@@ -22,8 +22,9 @@ type AssignTaskRequest struct {
 }
 
 type AssignTaskReply struct {
-	TaskType TaskType
-	FileName string
+	TaskType         TaskType
+	FileName         string
+	ReduceTaskNumber int64
 }
 
 type TaskDoneRequest struct {
@@ -31,7 +32,7 @@ type TaskDoneRequest struct {
 	FileName string
 }
 
-type TaskDoneRepply struct {
+type TaskDoneReply struct {
 }
 
 // Add your RPC definitions here.

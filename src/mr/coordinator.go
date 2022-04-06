@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -16,7 +17,12 @@ var (
 	DefaultTimeout = time.Second * 10
 )
 
+var (
+	ErrNoMatchingState = errors.New("no matching state")
+)
+
 type Coordinator struct {
+	ReduceTaskNumber    int64
 	MapInputSplit       chan string
 	MapStateMutex       sync.Mutex
 	RunningMapTaskState map[string]*time.Timer
@@ -29,6 +35,7 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 		taskName := <-c.MapInputSplit
 		reply.TaskType = TaskTypeMap
 		reply.FileName = taskName
+		reply.ReduceTaskNumber = c.ReduceTaskNumber
 
 		lg.Infof("job %v assigned", taskName)
 
@@ -44,9 +51,14 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 	return nil
 }
 
-func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneRepply) error {
+func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error {
 	if req.TaskType == TaskTypeMap {
-		stop := c.RunningMapTaskState[req.FileName].Stop()
+		timeout := c.RunningMapTaskState[req.FileName]
+		if timeout == nil {
+			lg.Error("no state kept for job :%v" + req.FileName)
+			return ErrNoMatchingState
+		}
+		stop := timeout.Stop()
 		if !stop {
 			lg.Infof("cancel job %v failed", req.FileName)
 		} else {
@@ -91,6 +103,7 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	c.ReduceTaskNumber = int64(nReduce)
 	c.MapInputSplit = make(chan string, len(files))
 	for _, file := range files {
 		c.MapInputSplit <- file

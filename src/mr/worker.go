@@ -1,10 +1,13 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 
 	lg "github.com/sirupsen/logrus"
 )
@@ -37,8 +40,41 @@ func Worker(mapf func(string, string) []KeyValue,
 	assignReply := &AssignTaskReply{}
 	call("Coordinator.AssignTask", assignReq, assignReply)
 
-	lg.Infoln(assignReply)
+	if assignReply.TaskType == TaskTypeMap {
+		file, err := os.Open(assignReply.FileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", assignReply.FileName)
+		}
+		defer file.Close()
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", assignReply.FileName)
+		}
+		interResult := mapf(assignReply.FileName, string(content))
 
+		tempFiles := make([]*json.Encoder, 0, assignReply.ReduceTaskNumber)
+		for i := 0; i < int(assignReply.ReduceTaskNumber); i++ {
+			tempFile, err := os.Create(fmt.Sprintf("mr-%v-%v", assignReply.FileName, i))
+			if err != nil {
+				lg.Error("create temporary file failed")
+				return
+			}
+			tempFiles = append(tempFiles, json.NewEncoder(tempFile))
+		}
+
+		for _, pair := range interResult {
+			bucket := ihash(pair.Key) % int(assignReply.ReduceTaskNumber)
+			tempFiles[bucket].Encode(&pair)
+		}
+
+	}
+
+	doneReq := &TaskDoneRequest{
+		TaskType: assignReply.TaskType,
+		FileName: assignReply.FileName,
+	}
+	doneReply := &TaskDoneReply{}
+	call("Coordinator.TaskDone", doneReq, doneReply)
 }
 
 func call(rpcname string, args interface{}, reply interface{}) bool {
