@@ -10,6 +10,7 @@ import (
 	"os"
 
 	lg "github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
 )
 
 //
@@ -38,9 +39,18 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	assignReq := &AssignTaskRequest{}
 	assignReply := &AssignTaskReply{}
+
 	call("Coordinator.AssignTask", assignReq, assignReply)
 
+	doneReq := &TaskDoneRequest{
+		TaskType:       assignReply.TaskType,
+		FileName:       assignReply.FileName,
+		ResultPosition: make(map[string]string),
+	}
+	doneReply := &TaskDoneReply{}
+
 	if assignReply.TaskType == TaskTypeMap {
+		lg.Info("begin to process map task:" + assignReply.FileName)
 		file, err := os.Open(assignReply.FileName)
 		if err != nil {
 			log.Fatalf("cannot open %v", assignReply.FileName)
@@ -54,7 +64,9 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		tempFiles := make([]*json.Encoder, 0, assignReply.ReduceTaskNumber)
 		for i := 0; i < int(assignReply.ReduceTaskNumber); i++ {
-			tempFile, err := os.Create(fmt.Sprintf("mr-%v-%v", assignReply.FileName, i))
+			position := fmt.Sprintf("mr-%v-%v", assignReply.FileName, i)
+			doneReq.ResultPosition[cast.ToString(i)] = position
+			tempFile, err := os.Create(position)
 			if err != nil {
 				lg.Error("create temporary file failed")
 				return
@@ -64,16 +76,13 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		for _, pair := range interResult {
 			bucket := ihash(pair.Key) % int(assignReply.ReduceTaskNumber)
-			tempFiles[bucket].Encode(&pair)
+			err := tempFiles[bucket].Encode(&pair)
+			if err != nil {
+				lg.Errorf("encode :%v failed", pair)
+			}
 		}
-
 	}
 
-	doneReq := &TaskDoneRequest{
-		TaskType: assignReply.TaskType,
-		FileName: assignReply.FileName,
-	}
-	doneReply := &TaskDoneReply{}
 	call("Coordinator.TaskDone", doneReq, doneReply)
 }
 

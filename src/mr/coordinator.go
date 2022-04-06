@@ -26,6 +26,7 @@ type Coordinator struct {
 	MapInputSplit       chan string
 	MapStateMutex       sync.Mutex
 	RunningMapTaskState map[string]*time.Timer
+	ReduceTaskPosition  map[string][]string
 }
 
 func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply) error {
@@ -55,7 +56,7 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 	if req.TaskType == TaskTypeMap {
 		timeout := c.RunningMapTaskState[req.FileName]
 		if timeout == nil {
-			lg.Error("no state kept for job :%v" + req.FileName)
+			lg.Errorf("no state kept for job :%v", req.FileName)
 			return ErrNoMatchingState
 		}
 		stop := timeout.Stop()
@@ -63,7 +64,11 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 			lg.Infof("cancel job %v failed", req.FileName)
 		} else {
 			lg.Infof("job :%v canceled successfully", req.FileName)
+			for reduceNum, position := range req.ResultPosition {
+				c.ReduceTaskPosition[reduceNum] = append(c.ReduceTaskPosition[reduceNum], position)
+			}
 		}
+		lg.Infof("reduce task :%v", c.ReduceTaskPosition)
 	}
 	return nil
 }
@@ -105,6 +110,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.ReduceTaskNumber = int64(nReduce)
 	c.MapInputSplit = make(chan string, len(files))
+	c.ReduceTaskPosition = make(map[string][]string)
 	for _, file := range files {
 		c.MapInputSplit <- file
 	}

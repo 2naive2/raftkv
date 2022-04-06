@@ -28,8 +28,9 @@ type AssignTaskReply struct {
 }
 
 type TaskDoneRequest struct {
-	TaskType TaskType
-	FileName string
+	TaskType       TaskType
+	FileName       string
+	ResultPosition map[string]string
 }
 
 type TaskDoneReply struct {
