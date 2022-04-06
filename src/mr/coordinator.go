@@ -1,29 +1,60 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
 
+	lg "github.com/sirupsen/logrus"
+)
+
+var (
+	DefaultTimeout = time.Second * 10
+)
 
 type Coordinator struct {
-	// Your definitions here.
-
+	MapInputSplit       chan string
+	MapStateMutex       sync.Mutex
+	RunningMapTaskState map[string]*time.Timer
 }
 
-// Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply) error {
+	// map task not finished yet,all worker will process
+	// map task
+	if len(c.MapInputSplit) > 0 {
+		taskName := <-c.MapInputSplit
+		reply.TaskType = TaskTypeMap
+		reply.FileName = taskName
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+		lg.Infof("job %v assigned", taskName)
+
+		go func() {
+			timeout := time.NewTimer(DefaultTimeout)
+			c.RunningMapTaskState[taskName] = timeout
+			<-timeout.C
+			lg.Warn("task timeout for job : " + taskName)
+			c.MapInputSplit <- taskName
+		}()
+
+	}
 	return nil
 }
 
+func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneRepply) error {
+	if req.TaskType == TaskTypeMap {
+		stop := c.RunningMapTaskState[req.FileName].Stop()
+		if !stop {
+			lg.Infof("cancel job %v failed", req.FileName)
+		} else {
+			lg.Infof("job :%v canceled successfully", req.FileName)
+		}
+	}
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +81,6 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -61,9 +91,13 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	c.MapInputSplit = make(chan string, len(files))
+	for _, file := range files {
+		c.MapInputSplit <- file
+	}
 
-	// Your code here.
-
+	c.MapStateMutex = sync.Mutex{}
+	c.RunningMapTaskState = make(map[string]*time.Timer)
 
 	c.server()
 	return &c
