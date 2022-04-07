@@ -80,7 +80,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				doneReq.ResultPosition[cast.ToString(i)] = position
 				tempFile, err := os.Create(position)
 				if err != nil {
-					lg.Error("create temporary file failed")
+					lg.Error("create temporary file failed,error:%v", err)
 					return
 				}
 				tempFiles = append(tempFiles, json.NewEncoder(tempFile))
