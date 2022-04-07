@@ -8,9 +8,9 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	lg "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 )
 
@@ -27,6 +27,8 @@ type Coordinator struct {
 	MapInputSplit       chan string
 	MapStateMutex       sync.Mutex
 	RunningMapTaskState map[string]*time.Timer
+	RunningMapTask      int64
+	RunningReduceTask   int64
 
 	ReduceInputSplit       chan int64
 	ReduceStateMutex       sync.Mutex
@@ -44,8 +46,7 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 		reply.TaskType = TaskTypeMap
 		reply.FileName = taskName
 		reply.ReduceTaskNumber = c.ReduceTaskNumber
-
-		lg.Infof("job %v assigned", taskName)
+		atomic.AddInt64(&c.RunningMapTask, 1)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
@@ -53,15 +54,18 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 			c.RunningMapTaskState[taskName] = timeout
 			c.MapStateMutex.Unlock()
 			<-timeout.C
-			lg.Warn("task timeout for job : " + taskName)
+
+			atomic.AddInt64(&c.RunningMapTask, -1)
+
 			c.MapInputSplit <- taskName
 		}()
 
-	} else if len(c.ReduceInputSplit) > 0 {
+	} else if atomic.LoadInt64(&c.RunningMapTask) == 0 && len(c.ReduceInputSplit) > 0 {
 		taskName := <-c.ReduceInputSplit
 		reply.TaskType = TaskTypeReduce
 		reply.CurrentReduceTaskNumber = taskName
 		reply.ReduceFileNames = c.ReduceTaskPosition[cast.ToString(taskName)]
+		atomic.AddInt64(&c.RunningReduceTask, 1)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
@@ -69,8 +73,9 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 			c.RunningReduceTaskState[cast.ToString(taskName)] = timeout
 			c.ReduceStateMutex.Unlock()
 			<-timeout.C
-			lg.Warnf("task timeout for job :%v", taskName)
+
 			c.ReduceInputSplit <- taskName
+			atomic.AddInt64(&c.RunningReduceTask, -1)
 		}()
 	} else {
 		reply.TaskType = TaskTypeNoTask
@@ -84,14 +89,16 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 		timeout := c.RunningMapTaskState[req.FileName]
 		c.MapStateMutex.Unlock()
 		if timeout == nil {
-			lg.Errorf("no state kept for job :%v", req.FileName)
+
 			return ErrNoMatchingState
 		}
 		stop := timeout.Stop()
 		if !stop {
-			lg.Infof("cancel job %v failed", req.FileName)
+
 		} else {
-			lg.Infof("job :%v canceled successfully", req.FileName)
+
+			atomic.AddInt64(&c.RunningMapTask, -1)
+
 			for reduceNum, position := range req.ResultPosition {
 				c.SliceMutex.Lock()
 				c.ReduceTaskPosition[reduceNum] = append(c.ReduceTaskPosition[reduceNum], position)
@@ -103,16 +110,17 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 		timeout := c.RunningReduceTaskState[req.FileName]
 		c.ReduceStateMutex.Unlock()
 		if timeout == nil {
-			lg.Errorf("no state kept for job :%v", req.FileName)
+
 			return ErrNoMatchingState
 		}
 		stop := timeout.Stop()
 		if !stop {
-			lg.Infof("cancel job %v failed", req.FileName)
+
 		} else {
-			lg.Infof("job :%v canceled successfully", req.FileName)
+			atomic.AddInt64(&c.RunningReduceTask, -1)
+
 		}
-		lg.Infof("reduce task:%v done", req.FileName)
+
 	}
 	return nil
 }
@@ -138,7 +146,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	return len(c.MapInputSplit) == 0 && len(c.ReduceInputSplit) == 0
+	return len(c.MapInputSplit) == 0 && len(c.ReduceInputSplit) == 0 && atomic.LoadInt64(&c.RunningMapTask) == 0 && atomic.LoadInt64(&c.RunningReduceTask) == 0
 }
 
 //

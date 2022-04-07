@@ -118,7 +118,8 @@ sleep 1
 
 # start multiple workers
 $TIMEOUT ../mrworker ../../mrapps/indexer.so &
-$TIMEOUT ../mrworker ../../mrapps/indexer.so
+$TIMEOUT ../mrworker ../../mrapps/indexer.so 
+sleep 3
 
 sort mr-out* | grep . > mr-indexer-all
 if cmp mr-indexer-all mr-correct-indexer.txt
@@ -130,6 +131,7 @@ else
   failed_any=1
 fi
 
+exit 0 
 wait
 
 #########################################################

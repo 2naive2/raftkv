@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 
-	lg "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 )
 
@@ -50,9 +49,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		assignReply := &AssignTaskReply{}
 
 		assignRes := call("Coordinator.AssignTask", assignReq, assignReply)
-		if !assignRes || assignReply.TaskType == TaskTypeNoTask {
-			lg.Info("job done for worker")
+		//if can't contact master,exit
+		if !assignRes {
 			return
+		}
+		if assignReply.TaskType == TaskTypeNoTask {
+			continue
 		}
 
 		doneReq := &TaskDoneRequest{
@@ -62,7 +64,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		doneReply := &TaskDoneReply{}
 
 		if assignReply.TaskType == TaskTypeMap {
-			lg.Info("begin to process map task:" + assignReply.FileName)
+
 			doneReq.FileName = assignReply.FileName
 			file, err := os.Open(assignReply.FileName)
 			if err != nil {
@@ -82,7 +84,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				doneReq.ResultPosition[cast.ToString(i)] = position
 				tempFile, err := os.Create(position)
 				if err != nil {
-					lg.Errorf("create temporary file failed,error:%v", err)
+
 					return
 				}
 				tempFiles = append(tempFiles, json.NewEncoder(tempFile))
@@ -92,17 +94,17 @@ func Worker(mapf func(string, string) []KeyValue,
 				bucket := ihash(pair.Key) % int(assignReply.ReduceTaskNumber)
 				err := tempFiles[bucket].Encode(&pair)
 				if err != nil {
-					lg.Errorf("encode :%v failed", pair)
+
 				}
 			}
 		} else if assignReply.TaskType == TaskTypeReduce {
-			lg.Infof("begin to process reduce task:%v", assignReply.FileName)
+
 			doneReq.FileName = cast.ToString(assignReply.CurrentReduceTaskNumber)
 			pairs := []KeyValue{}
 			for _, file := range assignReply.ReduceFileNames {
 				reduceFile, err := os.Open(file)
 				if err != nil {
-					lg.Errorf("open reduce file :%v failed,error:%v", file, err)
+
 					continue
 				}
 				decoder := json.NewDecoder(reduceFile)
@@ -119,7 +121,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			ofileName := fmt.Sprintf("mr-out-%v", assignReply.CurrentReduceTaskNumber)
 			ofile, err := os.Create(ofileName)
 			if err != nil {
-				lg.Errorf("create reduce file:%v failed,error:%v", ofileName, err)
+
 			}
 
 			i := 0
@@ -130,13 +132,14 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				sameKeySet := []string{}
 				for k := i; k < j; k++ {
-					sameKeySet = append(sameKeySet, pairs[i].Value)
+					sameKeySet = append(sameKeySet, pairs[k].Value)
 				}
 
 				reduceRes := reducef(pairs[i].Key, sameKeySet)
 				fmt.Fprintf(ofile, "%v %v\n", pairs[i].Key, reduceRes)
 				i = j
 			}
+			ofile.Close()
 
 		}
 
