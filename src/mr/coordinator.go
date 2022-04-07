@@ -49,7 +49,9 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
+			c.MapStateMutex.Lock()
 			c.RunningMapTaskState[taskName] = timeout
+			c.MapStateMutex.Unlock()
 			<-timeout.C
 			lg.Warn("task timeout for job : " + taskName)
 			c.MapInputSplit <- taskName
@@ -63,7 +65,9 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
+			c.ReduceStateMutex.Lock()
 			c.RunningReduceTaskState[cast.ToString(taskName)] = timeout
+			c.ReduceStateMutex.Unlock()
 			<-timeout.C
 			lg.Warnf("task timeout for job :%v", taskName)
 			c.ReduceInputSplit <- taskName
@@ -76,7 +80,9 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 
 func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error {
 	if req.TaskType == TaskTypeMap {
+		c.MapStateMutex.Lock()
 		timeout := c.RunningMapTaskState[req.FileName]
+		c.MapStateMutex.Unlock()
 		if timeout == nil {
 			lg.Errorf("no state kept for job :%v", req.FileName)
 			return ErrNoMatchingState
@@ -92,9 +98,10 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 				c.SliceMutex.Unlock()
 			}
 		}
-		lg.Infof("reduce task :%v", c.ReduceTaskPosition)
 	} else if req.TaskType == TaskTypeReduce {
+		c.ReduceStateMutex.Lock()
 		timeout := c.RunningReduceTaskState[req.FileName]
+		c.ReduceStateMutex.Unlock()
 		if timeout == nil {
 			lg.Errorf("no state kept for job :%v", req.FileName)
 			return ErrNoMatchingState
