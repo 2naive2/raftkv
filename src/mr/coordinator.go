@@ -68,7 +68,8 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 			lg.Warnf("task timeout for job :%v", taskName)
 			c.ReduceInputSplit <- taskName
 		}()
-
+	} else {
+		reply.TaskType = TaskTypeNoTask
 	}
 	return nil
 }

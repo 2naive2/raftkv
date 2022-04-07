@@ -16,6 +16,7 @@ type TaskType int64
 var (
 	TaskTypeMap    = TaskType(0)
 	TaskTypeReduce = TaskType(1)
+	TaskTypeNoTask = TaskType(2)
 )
 
 type AssignTaskRequest struct {
