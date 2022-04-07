@@ -11,6 +11,7 @@ import (
 	"time"
 
 	lg "github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
 )
 
 var (
@@ -26,7 +27,13 @@ type Coordinator struct {
 	MapInputSplit       chan string
 	MapStateMutex       sync.Mutex
 	RunningMapTaskState map[string]*time.Timer
-	ReduceTaskPosition  map[string][]string
+
+	ReduceInputSplit       chan int64
+	ReduceStateMutex       sync.Mutex
+	RunningReduceTaskState map[string]*time.Timer
+
+	SliceMutex         sync.Mutex
+	ReduceTaskPosition map[string][]string
 }
 
 func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply) error {
@@ -48,6 +55,20 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 			c.MapInputSplit <- taskName
 		}()
 
+	} else if len(c.ReduceInputSplit) > 0 {
+		taskName := <-c.ReduceInputSplit
+		reply.TaskType = TaskTypeReduce
+		reply.CurrentReduceTaskNumber = taskName
+		reply.ReduceFileNames = c.ReduceTaskPosition[cast.ToString(taskName)]
+
+		go func() {
+			timeout := time.NewTimer(DefaultTimeout)
+			c.RunningReduceTaskState[cast.ToString(taskName)] = timeout
+			<-timeout.C
+			lg.Warnf("task timeout for job :%v", taskName)
+			c.ReduceInputSplit <- taskName
+		}()
+
 	}
 	return nil
 }
@@ -65,10 +86,25 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 		} else {
 			lg.Infof("job :%v canceled successfully", req.FileName)
 			for reduceNum, position := range req.ResultPosition {
+				c.SliceMutex.Lock()
 				c.ReduceTaskPosition[reduceNum] = append(c.ReduceTaskPosition[reduceNum], position)
+				c.SliceMutex.Unlock()
 			}
 		}
 		lg.Infof("reduce task :%v", c.ReduceTaskPosition)
+	} else if req.TaskType == TaskTypeReduce {
+		timeout := c.RunningReduceTaskState[req.FileName]
+		if timeout == nil {
+			lg.Errorf("no state kept for job :%v", req.FileName)
+			return ErrNoMatchingState
+		}
+		stop := timeout.Stop()
+		if !stop {
+			lg.Infof("cancel job %v failed", req.FileName)
+		} else {
+			lg.Infof("job :%v canceled successfully", req.FileName)
+		}
+		lg.Infof("reduce task:%v done", req.FileName)
 	}
 	return nil
 }
@@ -94,11 +130,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	return len(c.MapInputSplit) == 0 && len(c.ReduceInputSplit) == 0
 }
 
 //
@@ -114,9 +146,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for _, file := range files {
 		c.MapInputSplit <- file
 	}
-
 	c.MapStateMutex = sync.Mutex{}
 	c.RunningMapTaskState = make(map[string]*time.Timer)
+
+	c.ReduceInputSplit = make(chan int64, c.ReduceTaskNumber)
+	for i := 0; i < int(c.ReduceTaskNumber); i++ {
+		c.ReduceInputSplit <- int64(i)
+	}
+	c.RunningReduceTaskState = make(map[string]*time.Timer)
+	c.SliceMutex = sync.Mutex{}
+	c.ReduceStateMutex = sync.Mutex{}
 
 	c.server()
 	return &c

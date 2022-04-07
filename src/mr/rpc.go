@@ -22,9 +22,11 @@ type AssignTaskRequest struct {
 }
 
 type AssignTaskReply struct {
-	TaskType         TaskType
-	FileName         string
-	ReduceTaskNumber int64
+	TaskType                TaskType
+	FileName                string
+	ReduceTaskNumber        int64
+	CurrentReduceTaskNumber int64
+	ReduceFileNames         []string
 }
 
 type TaskDoneRequest struct {
