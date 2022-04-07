@@ -23,16 +23,15 @@ var (
 )
 
 type Coordinator struct {
-	ReduceTaskNumber    int64
-	MapInputSplit       chan string
-	MapStateMutex       sync.Mutex
-	RunningMapTaskState map[string]*time.Timer
+	ReduceTaskNumber int64
+	MapInputSplit    chan string
+	// RunningMapTaskState map[string]*time.Timer
+	RunningMapTaskState sync.Map
 	RunningMapTask      int64
 	RunningReduceTask   int64
 
 	ReduceInputSplit       chan int64
-	ReduceStateMutex       sync.Mutex
-	RunningReduceTaskState map[string]*time.Timer
+	RunningReduceTaskState sync.Map
 
 	SliceMutex         sync.Mutex
 	ReduceTaskPosition map[string][]string
@@ -50,9 +49,7 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
-			c.MapStateMutex.Lock()
-			c.RunningMapTaskState[taskName] = timeout
-			c.MapStateMutex.Unlock()
+			c.RunningMapTaskState.Store(taskName, timeout)
 			<-timeout.C
 
 			atomic.AddInt64(&c.RunningMapTask, -1)
@@ -64,14 +61,14 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 		taskName := <-c.ReduceInputSplit
 		reply.TaskType = TaskTypeReduce
 		reply.CurrentReduceTaskNumber = taskName
+		c.SliceMutex.Lock()
 		reply.ReduceFileNames = c.ReduceTaskPosition[cast.ToString(taskName)]
+		c.SliceMutex.Unlock()
 		atomic.AddInt64(&c.RunningReduceTask, 1)
 
 		go func() {
 			timeout := time.NewTimer(DefaultTimeout)
-			c.ReduceStateMutex.Lock()
-			c.RunningReduceTaskState[cast.ToString(taskName)] = timeout
-			c.ReduceStateMutex.Unlock()
+			c.RunningReduceTaskState.Store(cast.ToString(taskName), timeout)
 			<-timeout.C
 
 			c.ReduceInputSplit <- taskName
@@ -85,13 +82,11 @@ func (c *Coordinator) AssignTask(req *AssignTaskRequest, reply *AssignTaskReply)
 
 func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error {
 	if req.TaskType == TaskTypeMap {
-		c.MapStateMutex.Lock()
-		timeout := c.RunningMapTaskState[req.FileName]
-		c.MapStateMutex.Unlock()
-		if timeout == nil {
-
+		val, ok := c.RunningMapTaskState.Load(req.FileName)
+		if !ok {
 			return ErrNoMatchingState
 		}
+		timeout := val.(*time.Timer)
 		stop := timeout.Stop()
 		if !stop {
 
@@ -106,13 +101,11 @@ func (c *Coordinator) TaskDone(req *TaskDoneRequest, reply *TaskDoneReply) error
 			}
 		}
 	} else if req.TaskType == TaskTypeReduce {
-		c.ReduceStateMutex.Lock()
-		timeout := c.RunningReduceTaskState[req.FileName]
-		c.ReduceStateMutex.Unlock()
-		if timeout == nil {
-
+		val, ok := c.RunningReduceTaskState.Load(req.FileName)
+		if !ok {
 			return ErrNoMatchingState
 		}
+		timeout := val.(*time.Timer)
 		stop := timeout.Stop()
 		if !stop {
 
@@ -162,16 +155,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for _, file := range files {
 		c.MapInputSplit <- file
 	}
-	c.MapStateMutex = sync.Mutex{}
-	c.RunningMapTaskState = make(map[string]*time.Timer)
 
 	c.ReduceInputSplit = make(chan int64, c.ReduceTaskNumber)
 	for i := 0; i < int(c.ReduceTaskNumber); i++ {
 		c.ReduceInputSplit <- int64(i)
 	}
-	c.RunningReduceTaskState = make(map[string]*time.Timer)
+	// c.RunningReduceTaskState = make(map[string]*time.Timer)
 	c.SliceMutex = sync.Mutex{}
-	c.ReduceStateMutex = sync.Mutex{}
 
 	c.server()
 	return &c
