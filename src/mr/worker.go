@@ -9,7 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
-	"unicode"
+	"strings"
 
 	lg "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
@@ -77,12 +77,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			tempFiles := make([]*json.Encoder, 0, assignReply.ReduceTaskNumber)
 			for i := 0; i < int(assignReply.ReduceTaskNumber); i++ {
-				for i := 0; i < len(assignReply.FileName); i++ {
-					if !unicode.IsLetter(rune(assignReply.FileName[i])) {
-						i++
-					}
-				}
-				fileName := assignReply.FileName[i:]
+				fileName := strings.TrimLeft(assignReply.FileName, "./")
 				position := fmt.Sprintf("mr-%v-%v", fileName, i)
 				doneReq.ResultPosition[cast.ToString(i)] = position
 				tempFile, err := os.Create(position)
