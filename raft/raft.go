@@ -26,6 +26,7 @@ import (
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
+	lg "github.com/sirupsen/logrus"
 )
 
 //
@@ -86,7 +87,6 @@ type Raft struct {
 
 	currentTerm int64
 	votedFor    *int64
-	isLeader    bool
 	entries     []LogEntry
 	state       RaftState
 
@@ -101,7 +101,7 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return int(rf.currentTerm), rf.isLeader
+	return int(rf.currentTerm), rf.state == RaftStateLeader
 }
 
 //
@@ -183,6 +183,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && args.LastLogIndex >= rf.commitIndex) {
+		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		voteID := args.CandidateID
 		rf.votedFor = &voteID
@@ -194,7 +195,7 @@ type AppendEntryRequest struct {
 	Term         int64
 	LeaderID     int64
 	PrevLogIndex int64
-	prevLogTerm  int64
+	PrevLogTerm  int64
 	Entries      []LogEntry
 	LeaderCommit int64
 }
@@ -210,24 +211,28 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		return
 	}
 
-	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.prevLogTerm {
-		if len(rf.entries)-1 >= int(req.PrevLogIndex) {
-			rf.entries = rf.entries[:req.PrevLogIndex]
-		}
-		resp.Success = false
-		return
-	}
+	// if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
+	// 	if len(rf.entries)-1 >= int(req.PrevLogIndex) {
+	// 		rf.entries = rf.entries[:req.PrevLogIndex]
+	// 	}
+	// 	resp.Success = false
+	// 	return
+	// }
 
 	if req.Term > rf.currentTerm {
 		rf.currentTerm = req.Term
 	}
-	rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
+	rf.state = RaftStateFollwer
+	// rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
 
 	if req.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
 	}
 	resp.Success = true
 	resp.Term = rf.currentTerm
+	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
+	rf.electionTimeout.Stop()
+	rf.electionTimeout.Reset(genRandomElectionTimeout())
 }
 
 //
@@ -316,83 +321,125 @@ func (rf *Raft) killed() bool {
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
+
+func (rf *Raft) sendHeartBeatToAllServer() {
+	finished := 0
+	req := AppendEntryRequest{
+		Term:         rf.currentTerm,
+		LeaderID:     int64(rf.me),
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      []LogEntry{},
+		LeaderCommit: rf.commitIndex,
+	}
+	resps := make([]AppendEntryResponse, len(rf.peers))
+
+	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(i int) {
+			ok := rf.sendAppendEntries(i, &req, &resps[i])
+			mu.Lock()
+			defer mu.Unlock()
+			if ok {
+				finished++
+			}
+			cond.Broadcast()
+		}(i)
+	}
+	mu.Lock()
+	for finished <= len(rf.peers) {
+		cond.Wait()
+	}
+	mu.Unlock()
+
+	for _, resp := range resps {
+		if resp.Term > rf.currentTerm {
+			rf.currentTerm = resp.Term
+			rf.state = RaftStateFollwer
+			lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
+		}
+	}
+
+}
+
+func (rf *Raft) heartBeat() {
+	for rf.state == RaftStateLeader {
+		<-rf.heartBeatTimeout.C
+		// send HeartBeat
+		go rf.sendHeartBeatToAllServer()
+		rf.heartBeatTimeout.Reset(HeartBeatInterval)
+	}
+}
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		select {
-		case _ = <-rf.electionTimeout.C:
-			rf.state = RaftStateCandidate
-			rf.currentTerm++
-			votes := 0
-			finished := 0
-			// vote for myself
-			voteFor := int64(rf.me)
-			rf.votedFor = &voteFor
-			votes++
-			cond := sync.NewCond(&rf.mu)
-			for i := range rf.peers {
-				if i == rf.me {
-					continue
-				}
-				go func(i int) {
-					lastLog, lastTerm := int64(0), int64(0)
-					if len(rf.entries) == 0 {
-						lastLog, lastTerm = 0, 0
-					} else {
-						lastLog, lastTerm = int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
-					}
-					req := RequestVoteArgs{
-						Term:         rf.currentTerm,
-						CandidateID:  int64(rf.me),
-						LastLogIndex: lastLog,
-						LastLogTerm:  lastTerm,
-					}
-					resp := RequestVoteReply{}
-					ok := rf.sendRequestVote(i, &req, &resp)
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					if ok && resp.VoteGranted {
-						votes++
-					}
-					finished++
-					cond.Broadcast()
-				}(i)
-
-				rf.mu.Lock()
-				for !(votes > len(rf.peers)/2 || finished == len(rf.peers)) {
-					cond.Wait()
-				}
-			}
-
-			if votes > len(rf.peers)/2 {
-				rf.state = RaftStateLeader
-
-				// send heart beat to all server to establish
-				// authority
-			}
-
-			rf.electionTimeout = time.NewTimer(time.Millisecond)
-		case _ = <-rf.heartBeatTimeout.C:
-			// send HeartBeat
-			req := AppendEntryRequest{
-				Term:         rf.currentTerm,
-				LeaderID:     int64(rf.me),
-				PrevLogIndex: 0,
-				prevLogTerm:  0,
-				Entries:      []LogEntry{},
-				LeaderCommit: 0,
-			}
-			resp := AppendEntryResponse{}
-			for i := range rf.peers {
-				if i == rf.me {
-					continue
-				}
-				go func(i int) {
-					rf.sendAppendEntries(i, &req, &resp)
-				}(i)
-			}
-
-			rf.heartBeatTimeout = time.NewTimer(HeartBeatInterval)
+		<-rf.electionTimeout.C
+		if rf.state == RaftStateLeader {
+			rf.electionTimeout.Reset(genRandomElectionTimeout())
+			continue
 		}
+		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, rf.currentTerm)
+		rf.state = RaftStateCandidate
+		rf.currentTerm++
+		votes := 1
+		finished := 0
+		// vote for myself
+		voteFor := int64(rf.me)
+		rf.votedFor = &voteFor
+		cond := sync.NewCond(&rf.mu)
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go func(i int) {
+				lastLog, lastTerm := int64(0), int64(0)
+				if len(rf.entries) == 0 {
+					lastLog, lastTerm = 0, 0
+				} else {
+					lastLog, lastTerm = int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
+				}
+				req := RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateID:  int64(rf.me),
+					LastLogIndex: lastLog,
+					LastLogTerm:  lastTerm,
+				}
+				resp := RequestVoteReply{}
+				ok := rf.sendRequestVote(i, &req, &resp)
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if ok && resp.VoteGranted {
+					votes++
+				}
+				finished++
+				cond.Broadcast()
+			}(i)
+		}
+
+		rf.mu.Lock()
+		for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
+			cond.Wait()
+		}
+		rf.mu.Unlock()
+
+		if votes > len(rf.peers)/2 {
+			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, rf.currentTerm, votes)
+			rf.state = RaftStateLeader
+			// start heart beat (periodically send heart beat to all servers)
+			// for this turn,immediatelly trigger a heart beat to be sent
+			// send heart beat to all server to establish
+			// authority
+			rf.heartBeatTimeout = time.NewTimer(0)
+			go rf.heartBeat()
+		} else {
+			lg.Infof("[%d] lose  election for term:%v", rf.me, rf.currentTerm)
+		}
+
+		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
 }
 
