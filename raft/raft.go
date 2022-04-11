@@ -58,7 +58,7 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Data []byte
+	Data interface{}
 	Term int64
 }
 
@@ -75,6 +75,7 @@ var (
 	ElectionMinTime   = time.Millisecond * 300
 	ElectionDeltaTime = 300
 	RPCTimeout        = time.Millisecond * 300
+	RPCRetryInterval  = time.Millisecond * 100
 )
 
 //
@@ -103,6 +104,8 @@ type Raft struct {
 	heartBeatTimeout *time.Timer
 	heartBeatMu      sync.Mutex
 	rander           rand.Rand
+
+	ApplyChan chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -167,85 +170,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
-}
-
-type RequestVoteArgs struct {
-	Term         int64
-	CandidateID  int64
-	LastLogIndex int64
-	LastLogTerm  int64
-}
-
-type RequestVoteReply struct {
-	Term        int64
-	VoteGranted bool
-}
-
-// stub impl for RequestVite
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// transition to a new term
-	//todo: consider logIndex
-	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
-		atomic.StoreInt64(&rf.currentTerm, args.Term)
-		rf.votedFor = nil
-	}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && args.LastLogIndex >= rf.commitIndex) {
-		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
-		reply.VoteGranted = true
-		voteID := args.CandidateID
-		rf.votedFor = &voteID
-
-		rf.electionTimeout.Stop()
-		rf.electionTimeout.Reset(genRandomElectionTimeout())
-	}
-	reply.Term = atomic.LoadInt64(&rf.currentTerm)
-}
-
-type AppendEntryRequest struct {
-	Term         int64
-	LeaderID     int64
-	PrevLogIndex int64
-	PrevLogTerm  int64
-	Entries      []LogEntry
-	LeaderCommit int64
-}
-
-type AppendEntryResponse struct {
-	Term    int64
-	Success bool
-}
-
-func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
-	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
-		resp.Success = false
-		return
-	}
-
-	// if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
-	// 	if len(rf.entries)-1 >= int(req.PrevLogIndex) {
-	// 		rf.entries = rf.entries[:req.PrevLogIndex]
-	// 	}
-	// 	resp.Success = false
-	// 	return
-	// }
-
-	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
-		atomic.StoreInt64(&rf.currentTerm, req.Term)
-	}
-	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-	// rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
-
-	if req.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
-	}
-	resp.Success = true
-	resp.Term = atomic.LoadInt64(&rf.currentTerm)
-	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
-	rf.electionTimeout.Stop()
-	rf.electionTimeout.Reset(genRandomElectionTimeout())
 }
 
 //
@@ -320,13 +244,70 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+		return -1, int(rf.currentTerm), false
+	}
 
-	// Your code here (2B).
+	lastLog, lastTerm := int64(0), int64(0)
+	if len(rf.entries) == 0 {
+		lastLog, lastTerm = 0, 0
+	} else {
+		lastLog, lastTerm = int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
+	}
 
-	return index, term, isLeader
+	entry := LogEntry{Term: rf.currentTerm, Data: command}
+	rf.entries = append(rf.entries, entry)
+
+	go func(term, leaderCommit int64) {
+		replicated := 1
+		var mu sync.Mutex
+		cond := sync.NewCond(&mu)
+		req := AppendEntryRequest{
+			Term:         term,
+			LeaderID:     int64(rf.me),
+			PrevLogIndex: lastLog,
+			PrevLogTerm:  lastTerm,
+			Entries:      []LogEntry{entry},
+			LeaderCommit: leaderCommit,
+		}
+		resps := make([]AppendEntryResponse, len(rf.peers))
+
+		//! try all RPC until all followers respond
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			go func(i int) {
+				for !rf.sendAppendEntries(i, &req, &resps[i]) {
+					time.Sleep(RPCRetryInterval)
+				}
+				if resps[i].Success {
+					mu.Lock()
+					replicated++
+					cond.Broadcast()
+					mu.Unlock()
+				}
+
+			}(i)
+		}
+
+		mu.Lock()
+		for replicated > len(rf.peers)/2 {
+			cond.Wait()
+		}
+		mu.Unlock()
+		lg.Infof("[%d] agree on :%d", atomic.LoadInt64(&rf.currentTerm), len(rf.entries)-1)
+
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      command,
+			CommandIndex: len(rf.entries) - 1,
+		}
+		// rf.commitIndex = maxInt64(rf.commitIndex, len)
+		rf.ApplyChan <- msg
+	}(rf.currentTerm, rf.commitIndex)
+
+	return len(rf.peers) - 1, int(rf.currentTerm), true
 }
 
 //
@@ -441,6 +422,13 @@ func (rf *Raft) ticker() {
 				if ok && resp.VoteGranted {
 					votes++
 				}
+
+				if resp.Term > atomic.LoadInt64(&rf.currentTerm) {
+					atomic.StoreInt64(&rf.currentTerm, resp.Term)
+					atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+					lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
+				}
+
 				finished++
 				cond.Broadcast()
 			}(i)
@@ -488,9 +476,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.ApplyChan = applyCh
 
 	rf.electionTimeout = time.NewTimer(genRandomElectionTimeout())
-	rf.entries = []LogEntry{}
+	rf.entries = []LogEntry{{Term: 0, Data: -1}}
 
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -501,16 +490,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	return rf
-}
-
-func genRandomElectionTimeout() time.Duration {
-	nums := rand.Int63n(int64(ElectionDeltaTime))
-	return ElectionMinTime + time.Duration(nums)*time.Millisecond
-}
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }
