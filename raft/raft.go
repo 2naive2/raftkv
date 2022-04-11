@@ -248,12 +248,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, int(rf.currentTerm), false
 	}
 
-	lastLog, lastTerm := int64(0), int64(0)
-	if len(rf.entries) == 0 {
-		lastLog, lastTerm = 0, 0
-	} else {
-		lastLog, lastTerm = int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
-	}
+	lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
@@ -403,12 +398,7 @@ func (rf *Raft) ticker() {
 				continue
 			}
 			go func(i int) {
-				lastLog, lastTerm := int64(0), int64(0)
-				if len(rf.entries) == 0 {
-					lastLog, lastTerm = 0, 0
-				} else {
-					lastLog, lastTerm = int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
-				}
+				lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
 				req := RequestVoteArgs{
 					Term:         rf.currentTerm,
 					CandidateID:  int64(rf.me),

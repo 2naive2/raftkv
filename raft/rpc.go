@@ -74,11 +74,21 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		atomic.StoreInt64(&rf.currentTerm, req.Term)
 	}
 	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-	// rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
+	rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
 
 	//todo : commit entries
 	if req.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
+		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
+		commiteEntries := rf.entries[rf.commitIndex:newCommitIndex]
+		for i, entry := range commiteEntries {
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Data,
+				CommandIndex: i + int(rf.commitIndex),
+			}
+			rf.ApplyChan <- msg
+		}
+		rf.commitIndex = newCommitIndex
 	}
 	resp.Success = true
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
