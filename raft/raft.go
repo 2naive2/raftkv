@@ -71,11 +71,13 @@ var (
 )
 
 var (
-	HeartBeatInterval = time.Millisecond * 100
-	ElectionMinTime   = time.Millisecond * 300
-	ElectionDeltaTime = 300
-	RPCTimeout        = time.Millisecond * 300
-	RPCRetryInterval  = time.Millisecond * 100
+	HeartBeatInterval         = time.Millisecond * 100
+	ElectionMinTime           = time.Millisecond * 300
+	ElectionDeltaTime         = 300
+	RPCTimeout                = time.Millisecond * 300
+	RPCRetryInterval          = time.Millisecond * 100
+	SyncLoginterval           = time.Millisecond * 20
+	UpdateCommitIndexinterval = time.Millisecond * 20
 )
 
 //
@@ -103,9 +105,13 @@ type Raft struct {
 	electionTimeout  *time.Timer
 	heartBeatTimeout *time.Timer
 	heartBeatMu      sync.Mutex
-	rander           rand.Rand
 
 	ApplyChan chan ApplyMsg
+
+	syncLogTimeout           *time.Timer
+	updateCommitIndexTimeout *time.Timer
+	nextIndex                []int64
+	matchIndex               []int64
 }
 
 // return currentTerm and whether this server
@@ -441,12 +447,84 @@ func (rf *Raft) ticker() {
 			rf.heartBeatTimeout = time.NewTimer(0)
 			rf.heartBeatMu.Unlock()
 			go rf.heartBeat()
+			rf.syncLogTimeout = time.NewTimer(0)
+			go rf.syncLogs()
+			rf.updateCommitIndexTimeout = time.NewTimer(0)
+			go rf.updateCommitIndex()
 		} else {
 			lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		}
 		voteMutex.Unlock()
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
+	}
+}
+
+func (rf *Raft) syncLogs() {
+	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+		<-rf.syncLogTimeout.C
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			if len(rf.entries)-1 >= int(rf.nextIndex[i]) {
+				go func(i int) {
+					for {
+						entries := rf.entries[rf.nextIndex[i]:]
+						req := AppendEntryRequest{
+							Term:         rf.currentTerm,
+							LeaderID:     int64(rf.me),
+							PrevLogIndex: rf.nextIndex[i] - 1,
+							PrevLogTerm:  rf.entries[rf.nextIndex[i]-1].Term,
+							Entries:      entries,
+							LeaderCommit: rf.commitIndex,
+						}
+						resp := AppendEntryResponse{}
+						if !rf.sendAppendEntries(i, &req, &resp) {
+							continue
+						}
+						if resp.Success {
+							rf.nextIndex[i] = int64(len(rf.entries))
+							rf.matchIndex[i] = int64(len(rf.entries)) - 1
+							// immediate issue an round of checks to update leader commit
+							rf.updateCommitIndexTimeout.Stop()
+							rf.updateCommitIndexTimeout.Reset(0)
+							break
+						} else {
+							rf.nextIndex[i]--
+						}
+					}
+				}(i)
+			}
+		}
+
+		rf.syncLogTimeout.Reset(SyncLoginterval)
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+		<-rf.updateCommitIndexTimeout.C
+
+		for cur := rf.commitIndex + 1; int(cur) < len(rf.entries); cur++ {
+			if rf.entries[cur].Term != rf.currentTerm {
+				continue
+			}
+			replicated := 1
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				if rf.matchIndex[i] >= cur {
+					replicated++
+				}
+			}
+			if replicated > len(rf.peers)/2 {
+				rf.commitIndex = cur
+			}
+		}
+
+		rf.updateCommitIndexTimeout.Reset(UpdateCommitIndexinterval)
 	}
 }
 
@@ -471,6 +549,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.electionTimeout = time.NewTimer(genRandomElectionTimeout())
 	rf.entries = []LogEntry{{Term: 0, Data: -1}}
+	rf.nextIndex = make([]int64, len(rf.peers))
+	rf.matchIndex = make([]int64, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = 1
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
 
