@@ -392,7 +392,9 @@ func (rf *Raft) heartBeat() {
 		<-rf.heartBeatTimeout.C
 		// send HeartBeat
 		go rf.sendHeartBeatToAllServer()
+		rf.heartBeatMu.Lock()
 		rf.heartBeatTimeout.Reset(HeartBeatInterval)
+		rf.heartBeatMu.Unlock()
 	}
 }
 
@@ -449,7 +451,7 @@ func (rf *Raft) ticker() {
 			cond.Wait()
 		}
 		if votes > len(rf.peers)/2 {
-			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, rf.currentTerm, votes)
+			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), votes)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
 
 			// start heart beat (periodically send heart beat to all servers)
