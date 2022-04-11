@@ -208,7 +208,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		result <- ok
 	}()
 	select {
-	case _ = <-time.After(RPCTimeout):
+	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
 		return res
@@ -222,7 +222,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 		result <- ok
 	}()
 	select {
-	case _ = <-time.After(RPCTimeout):
+	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
 		return res
@@ -291,8 +291,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			cond.Wait()
 		}
 		mu.Unlock()
-		lg.Infof("[%d] agree on :%d", atomic.LoadInt64(&rf.currentTerm), len(rf.entries)-1)
+		lg.Infof("[%d] agree on :%d", rf.me, len(rf.entries)-1)
 
+		rf.commitIndex = lastLog + 1
 		msg := ApplyMsg{
 			CommandValid: true,
 			Command:      command,
@@ -302,7 +303,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.ApplyChan <- msg
 	}(rf.currentTerm, rf.commitIndex)
 
-	return len(rf.peers) - 1, int(rf.currentTerm), true
+	return len(rf.entries) - 1, int(rf.currentTerm), true
 }
 
 //
@@ -333,8 +334,8 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 	req := AppendEntryRequest{
 		Term:         atomic.LoadInt64(&rf.currentTerm),
 		LeaderID:     int64(rf.me),
-		PrevLogIndex: 0,
-		PrevLogTerm:  0,
+		PrevLogIndex: int64(len(rf.entries) - 1),
+		PrevLogTerm:  rf.entries[len(rf.entries)-1].Term,
 		Entries:      []LogEntry{},
 		LeaderCommit: rf.commitIndex,
 	}

@@ -62,31 +62,29 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		return
 	}
 
-	// if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
-	// 	if len(rf.entries)-1 >= int(req.PrevLogIndex) {
-	// 		rf.entries = rf.entries[:req.PrevLogIndex]
-	// 	}
-	// 	resp.Success = false
-	// 	return
-	// }
-
 	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, req.Term)
 	}
 	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-	rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
 
-	//todo : commit entries
+	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
+		resp.Success = false
+		return
+	}
+
+	// append new entries
+	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
+
 	if req.LeaderCommit > rf.commitIndex {
 		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
-		commiteEntries := rf.entries[rf.commitIndex:newCommitIndex]
-		for i, entry := range commiteEntries {
+		for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
 			msg := ApplyMsg{
 				CommandValid: true,
-				Command:      entry.Data,
-				CommandIndex: i + int(rf.commitIndex),
+				Command:      rf.entries[i].Data,
+				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
+			lg.Infof("[%d] commit log at %d", rf.me, i)
 		}
 		rf.commitIndex = newCommitIndex
 	}
