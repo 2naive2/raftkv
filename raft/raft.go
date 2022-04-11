@@ -30,6 +30,7 @@ import (
 )
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
 	lg.SetFormatter(&lg.TextFormatter{FullTimestamp: true})
 }
 
@@ -73,6 +74,7 @@ var (
 	HeartBeatInterval = time.Millisecond * 100
 	ElectionMinTime   = time.Millisecond * 300
 	ElectionDeltaTime = 300
+	RPCTimeout        = time.Millisecond * 300
 )
 
 //
@@ -99,6 +101,7 @@ type Raft struct {
 
 	electionTimeout  *time.Timer
 	heartBeatTimeout *time.Timer
+	heartBeatMu      sync.Mutex
 	rander           rand.Rand
 }
 
@@ -199,7 +202,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
 	reply.Term = atomic.LoadInt64(&rf.currentTerm)
-
 }
 
 type AppendEntryRequest struct {
@@ -240,7 +242,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		rf.commitIndex = minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
 	}
 	resp.Success = true
-	resp.Term = rf.currentTerm
+	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
@@ -276,13 +278,31 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	result := make(chan bool, 1)
+	go func() {
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		result <- ok
+	}()
+	select {
+	case _ = <-time.After(RPCTimeout):
+		return false
+	case res := <-result:
+		return res
+	}
 }
 
-func (rf *Raft) sendAppendEntries(server int, req *AppendEntryRequest, resp *AppendEntryResponse) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", req, resp)
-	return ok
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *AppendEntryResponse) bool {
+	result := make(chan bool, 1)
+	go func() {
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		result <- ok
+	}()
+	select {
+	case _ = <-time.After(RPCTimeout):
+		return false
+	case res := <-result:
+		return res
+	}
 }
 
 //
@@ -344,22 +364,26 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 	}
 	resps := make([]AppendEntryResponse, len(rf.peers))
 
+	var wg sync.WaitGroup
+	wg.Add(len(rf.peers) - 1)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(i int) {
 			rf.sendAppendEntries(i, &req, &resps[i])
+			wg.Done()
 		}(i)
 	}
+	wg.Wait()
 
-	// for _, resp := range resps {
-	// 	if resp.Term > rf.currentTerm {
-	// 		rf.currentTerm = resp.Term
-	// 		rf.state = RaftStateFollwer
-	// 		lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
-	// 	}
-	// }
+	for _, resp := range resps {
+		if resp.Term > atomic.LoadInt64(&rf.currentTerm) {
+			atomic.StoreInt64(&rf.currentTerm, resp.Term)
+			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+			lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
+		}
+	}
 
 }
 
@@ -382,11 +406,13 @@ func (rf *Raft) ticker() {
 		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateCandidate))
 		atomic.AddInt64(&rf.currentTerm, 1)
+		rf.mu.Lock()
+		voteFor := int64(rf.me)
+		rf.votedFor = &voteFor
+		rf.mu.Unlock()
 		votes := 1
 		finished := 0
 		// vote for myself
-		voteFor := int64(rf.me)
-		rf.votedFor = &voteFor
 		voteMutex := sync.Mutex{}
 		cond := sync.NewCond(&voteMutex)
 		for i := range rf.peers {
@@ -430,10 +456,12 @@ func (rf *Raft) ticker() {
 			// for this turn,immediatelly trigger a heart beat to be sent
 			// send heart beat to all server to establish
 			// authority
+			rf.heartBeatMu.Lock()
 			rf.heartBeatTimeout = time.NewTimer(0)
+			rf.heartBeatMu.Unlock()
 			go rf.heartBeat()
 		} else {
-			lg.Infof("[%d] lose  election for term:%v", rf.me, rf.currentTerm)
+			lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		}
 		voteMutex.Unlock()
 
