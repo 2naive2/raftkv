@@ -254,60 +254,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, int(rf.currentTerm), false
 	}
 
-	lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
-
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
 
-	go func(term, leaderCommit int64) {
-		replicated := 1
-		var mu sync.Mutex
-		cond := sync.NewCond(&mu)
-		req := AppendEntryRequest{
-			Term:         term,
-			LeaderID:     int64(rf.me),
-			PrevLogIndex: lastLog,
-			PrevLogTerm:  lastTerm,
-			Entries:      []LogEntry{entry},
-			LeaderCommit: leaderCommit,
-		}
-		resps := make([]AppendEntryResponse, len(rf.peers))
-
-		//! try all RPC until all followers respond
-		for i := 0; i < len(rf.peers); i++ {
-			if i == rf.me {
-				continue
-			}
-			go func(i int) {
-				for !rf.sendAppendEntries(i, &req, &resps[i]) {
-					time.Sleep(RPCRetryInterval)
-				}
-				if resps[i].Success {
-					mu.Lock()
-					replicated++
-					cond.Broadcast()
-					mu.Unlock()
-				}
-
-			}(i)
-		}
-
-		mu.Lock()
-		for replicated > len(rf.peers)/2 {
-			cond.Wait()
-		}
-		mu.Unlock()
-		lg.Infof("[%d] agree on :%d", rf.me, len(rf.entries)-1)
-
-		rf.commitIndex = lastLog + 1
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      command,
-			CommandIndex: len(rf.entries) - 1,
-		}
-		// rf.commitIndex = maxInt64(rf.commitIndex, len)
-		rf.ApplyChan <- msg
-	}(rf.currentTerm, rf.commitIndex)
+	// immediate begin to sync log to followers
+	rf.syncLogTimeout.Stop()
+	rf.syncLogTimeout.Reset(0)
 
 	return len(rf.entries) - 1, int(rf.currentTerm), true
 }
@@ -521,6 +473,14 @@ func (rf *Raft) updateCommitIndex() {
 			}
 			if replicated > len(rf.peers)/2 {
 				rf.commitIndex = cur
+
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.entries[cur].Data,
+					CommandIndex: int(cur),
+				}
+				// rf.commitIndex = maxInt64(rf.commitIndex, len)
+				rf.ApplyChan <- msg
 			}
 		}
 
