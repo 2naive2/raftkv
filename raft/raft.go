@@ -29,6 +29,10 @@ import (
 	lg "github.com/sirupsen/logrus"
 )
 
+func init() {
+	lg.SetFormatter(&lg.TextFormatter{FullTimestamp: true})
+}
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -101,7 +105,7 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return int(rf.currentTerm), rf.state == RaftStateLeader
+	return int(atomic.LoadInt64(&rf.currentTerm)), atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader)
 }
 
 //
@@ -177,18 +181,25 @@ type RequestVoteReply struct {
 // stub impl for RequestVite
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// transition to a new term
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
+	//todo: consider logIndex
+	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
+		atomic.StoreInt64(&rf.currentTerm, args.Term)
 		rf.votedFor = nil
 	}
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && args.LastLogIndex >= rf.commitIndex) {
 		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		voteID := args.CandidateID
 		rf.votedFor = &voteID
+
+		rf.electionTimeout.Stop()
+		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
-	reply.Term = rf.currentTerm
+	reply.Term = atomic.LoadInt64(&rf.currentTerm)
+
 }
 
 type AppendEntryRequest struct {
@@ -206,7 +217,7 @@ type AppendEntryResponse struct {
 }
 
 func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
-	if req.Term < rf.currentTerm {
+	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
 		resp.Success = false
 		return
 	}
@@ -219,10 +230,10 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	// 	return
 	// }
 
-	if req.Term > rf.currentTerm {
-		rf.currentTerm = req.Term
+	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
+		atomic.StoreInt64(&rf.currentTerm, req.Term)
 	}
-	rf.state = RaftStateFollwer
+	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 	// rf.entries = append(rf.entries[:req.PrevLogIndex], req.Entries...)
 
 	if req.LeaderCommit > rf.commitIndex {
@@ -323,9 +334,8 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 
 func (rf *Raft) sendHeartBeatToAllServer() {
-	finished := 0
 	req := AppendEntryRequest{
-		Term:         rf.currentTerm,
+		Term:         atomic.LoadInt64(&rf.currentTerm),
 		LeaderID:     int64(rf.me),
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
@@ -334,40 +344,27 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 	}
 	resps := make([]AppendEntryResponse, len(rf.peers))
 
-	var mu sync.Mutex
-	cond := sync.NewCond(&mu)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(i int) {
-			ok := rf.sendAppendEntries(i, &req, &resps[i])
-			mu.Lock()
-			defer mu.Unlock()
-			if ok {
-				finished++
-			}
-			cond.Broadcast()
+			rf.sendAppendEntries(i, &req, &resps[i])
 		}(i)
 	}
-	mu.Lock()
-	for finished <= len(rf.peers) {
-		cond.Wait()
-	}
-	mu.Unlock()
 
-	for _, resp := range resps {
-		if resp.Term > rf.currentTerm {
-			rf.currentTerm = resp.Term
-			rf.state = RaftStateFollwer
-			lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
-		}
-	}
+	// for _, resp := range resps {
+	// 	if resp.Term > rf.currentTerm {
+	// 		rf.currentTerm = resp.Term
+	// 		rf.state = RaftStateFollwer
+	// 		lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
+	// 	}
+	// }
 
 }
 
 func (rf *Raft) heartBeat() {
-	for rf.state == RaftStateLeader {
+	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 		<-rf.heartBeatTimeout.C
 		// send HeartBeat
 		go rf.sendHeartBeatToAllServer()
@@ -378,19 +375,20 @@ func (rf *Raft) heartBeat() {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		<-rf.electionTimeout.C
-		if rf.state == RaftStateLeader {
+		if atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 			rf.electionTimeout.Reset(genRandomElectionTimeout())
 			continue
 		}
-		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, rf.currentTerm)
-		rf.state = RaftStateCandidate
-		rf.currentTerm++
+		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateCandidate))
+		atomic.AddInt64(&rf.currentTerm, 1)
 		votes := 1
 		finished := 0
 		// vote for myself
 		voteFor := int64(rf.me)
 		rf.votedFor = &voteFor
-		cond := sync.NewCond(&rf.mu)
+		voteMutex := sync.Mutex{}
+		cond := sync.NewCond(&voteMutex)
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
@@ -410,8 +408,8 @@ func (rf *Raft) ticker() {
 				}
 				resp := RequestVoteReply{}
 				ok := rf.sendRequestVote(i, &req, &resp)
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				voteMutex.Lock()
+				defer voteMutex.Unlock()
 				if ok && resp.VoteGranted {
 					votes++
 				}
@@ -420,15 +418,14 @@ func (rf *Raft) ticker() {
 			}(i)
 		}
 
-		rf.mu.Lock()
+		voteMutex.Lock()
 		for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
 			cond.Wait()
 		}
-		rf.mu.Unlock()
-
 		if votes > len(rf.peers)/2 {
 			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, rf.currentTerm, votes)
-			rf.state = RaftStateLeader
+			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
+
 			// start heart beat (periodically send heart beat to all servers)
 			// for this turn,immediatelly trigger a heart beat to be sent
 			// send heart beat to all server to establish
@@ -438,6 +435,7 @@ func (rf *Raft) ticker() {
 		} else {
 			lg.Infof("[%d] lose  election for term:%v", rf.me, rf.currentTerm)
 		}
+		voteMutex.Unlock()
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
