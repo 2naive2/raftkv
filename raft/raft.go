@@ -76,8 +76,8 @@ var (
 	ElectionDeltaTime         = 300
 	RPCTimeout                = time.Millisecond * 300
 	RPCRetryInterval          = time.Millisecond * 100
-	SyncLoginterval           = time.Millisecond * 20
-	UpdateCommitIndexinterval = time.Millisecond * 20
+	SyncLoginterval           = time.Millisecond * 10
+	UpdateCommitIndexinterval = time.Millisecond * 10
 )
 
 //
@@ -143,7 +143,6 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
 	// Example:
 	// r := bytes.NewBuffer(data)
 	// d := labgob.NewDecoder(r)
@@ -217,6 +216,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
+		if reply.Term > rf.currentTerm {
+			atomic.StoreInt64(&rf.currentTerm, reply.Term)
+			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+		}
 		return res
 	}
 }
@@ -231,6 +234,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
+		if reply.Term > rf.currentTerm {
+			atomic.StoreInt64(&rf.currentTerm, reply.Term)
+			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+		}
 		return res
 	}
 }
@@ -256,6 +263,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
+	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 
 	// immediate begin to sync log to followers
 	rf.syncLogTimeout.Stop()
@@ -371,13 +379,6 @@ func (rf *Raft) ticker() {
 				if ok && resp.VoteGranted {
 					votes++
 				}
-
-				if resp.Term > atomic.LoadInt64(&rf.currentTerm) {
-					atomic.StoreInt64(&rf.currentTerm, resp.Term)
-					atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-					lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
-				}
-
 				finished++
 				cond.Broadcast()
 			}(i)
@@ -387,9 +388,17 @@ func (rf *Raft) ticker() {
 		for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
 			cond.Wait()
 		}
-		if votes > len(rf.peers)/2 {
+
+		//* a candidate could revert to follower due to a higher term in response
+		//todo : consider atomicity
+		if votes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
 			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), votes)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
+			// reinitialize voloatile state
+			for i := 0; i < len(rf.peers); i++ {
+				rf.matchIndex[i] = 0
+				rf.nextIndex[i] = 1
+			}
 
 			// start heart beat (periodically send heart beat to all servers)
 			// for this turn,immediatelly trigger a heart beat to be sent
@@ -413,14 +422,23 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) syncLogs() {
+	syncing := make([]int64, len(rf.peers))
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 		<-rf.syncLogTimeout.C
+		if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+			return
+		}
+
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
 			if len(rf.entries)-1 >= int(rf.nextIndex[i]) {
+				if atomic.LoadInt64(&syncing[i]) == 1 {
+					continue
+				}
 				go func(i int) {
+					atomic.StoreInt64(&syncing[i], 1)
 					for {
 						entries := rf.entries[rf.nextIndex[i]:]
 						req := AppendEntryRequest{
@@ -435,6 +453,12 @@ func (rf *Raft) syncLogs() {
 						if !rf.sendAppendEntries(i, &req, &resp) {
 							continue
 						}
+						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+							// immediately terminal sync log thread
+							rf.syncLogTimeout.Stop()
+							rf.syncLogTimeout.Reset(0)
+							break
+						}
 						if resp.Success {
 							rf.nextIndex[i] = int64(len(rf.entries))
 							rf.matchIndex[i] = int64(len(rf.entries)) - 1
@@ -443,9 +467,11 @@ func (rf *Raft) syncLogs() {
 							rf.updateCommitIndexTimeout.Reset(0)
 							break
 						} else {
+							lg.Infof("[%d] detect inconsistency in [%d],cur nextIndex:%d", rf.me, i, rf.nextIndex[i])
 							rf.nextIndex[i]--
 						}
 					}
+					atomic.StoreInt64(&syncing[i], 0)
 				}(i)
 			}
 		}
@@ -472,6 +498,7 @@ func (rf *Raft) updateCommitIndex() {
 				}
 			}
 			if replicated > len(rf.peers)/2 {
+				lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 				rf.commitIndex = cur
 
 				msg := ApplyMsg{

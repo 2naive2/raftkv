@@ -30,7 +30,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && args.LastLogIndex >= rf.commitIndex) {
+	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && tuppleBigger(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1))) {
 		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		voteID := args.CandidateID
@@ -57,6 +57,7 @@ type AppendEntryResponse struct {
 }
 
 func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
+	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
 		resp.Success = false
 		return
@@ -65,6 +66,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, req.Term)
 	}
+
 	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
@@ -72,8 +74,11 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		return
 	}
 
-	// append new entries
+	// append new entries *
+	//
+	//
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
+	// lg.Infof("[%d] entries:%v", rf.me, rf.entries)
 
 	if req.LeaderCommit > rf.commitIndex {
 		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
@@ -84,7 +89,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
-			lg.Infof("[%d] commit log at %d", rf.me, i)
+			lg.Infof("[%d] follower commits log at %d", rf.me, i)
 		}
 		rf.commitIndex = newCommitIndex
 	}

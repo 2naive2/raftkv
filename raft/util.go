@@ -34,3 +34,13 @@ func maxInt64(a, b int64) int64 {
 	}
 	return b
 }
+
+func tuppleBigger(a1, a2, b1, b2 int64) bool {
+	if a1 > b1 {
+		return true
+	}
+	if a1 == b1 {
+		return a2 >= b2
+	}
+	return false
+}
