@@ -265,7 +265,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
+	rf.mu.Lock()
 	rf.entries = append(rf.entries, entry)
+	rf.mu.Unlock()
 	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 
 	// immediate begin to sync log to followers
@@ -437,6 +439,7 @@ func (rf *Raft) syncLogs() {
 			if i == rf.me {
 				continue
 			}
+
 			if len(rf.entries)-1 >= int(rf.nextIndex[i]) {
 				if atomic.LoadInt64(&syncing[i]) == 1 {
 					continue
@@ -444,6 +447,8 @@ func (rf *Raft) syncLogs() {
 				go func(i int) {
 					atomic.StoreInt64(&syncing[i], 1)
 					for {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
 						entries := rf.entries[rf.nextIndex[i]:]
 						req := AppendEntryRequest{
 							Term:         rf.currentTerm,

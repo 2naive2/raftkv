@@ -430,6 +430,7 @@ loop:
 
 		if failed {
 			// avoid leaking goroutines
+			//
 			go func() {
 				for range is {
 				}
