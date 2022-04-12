@@ -80,6 +80,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
 	// lg.Infof("[%d] entries:%v", rf.me, rf.entries)
 
+	// todo consider resend to channel
 	if req.LeaderCommit > rf.commitIndex {
 		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
 		for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
@@ -92,6 +93,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 			lg.Infof("[%d] follower commits log at %d", rf.me, i)
 		}
 		rf.commitIndex = newCommitIndex
+		rf.applyChanIndex[rf.me] = newCommitIndex
 	}
 	resp.Success = true
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)

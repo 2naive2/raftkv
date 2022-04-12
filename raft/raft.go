@@ -112,6 +112,9 @@ type Raft struct {
 	updateCommitIndexTimeout *time.Timer
 	nextIndex                []int64
 	matchIndex               []int64
+
+	applyChanIndex []int64
+	firstCommit    int64
 }
 
 // return currentTerm and whether this server
@@ -412,6 +415,7 @@ func (rf *Raft) ticker() {
 			go rf.syncLogs()
 			rf.updateCommitIndexTimeout = time.NewTimer(0)
 			go rf.updateCommitIndex()
+			rf.firstCommit = 0
 		} else {
 			lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		}
@@ -498,16 +502,32 @@ func (rf *Raft) updateCommitIndex() {
 				}
 			}
 			if replicated > len(rf.peers)/2 {
-				lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 				rf.commitIndex = cur
-
-				msg := ApplyMsg{
-					CommandValid: true,
-					Command:      rf.entries[cur].Data,
-					CommandIndex: int(cur),
+				// * only update commit thread will access first-commit
+				if rf.firstCommit == 0 {
+					for i := rf.applyChanIndex[rf.me] + 1; i <= cur; i++ {
+						msg := ApplyMsg{
+							CommandValid: true,
+							Command:      rf.entries[i].Data,
+							CommandIndex: int(i),
+						}
+						// rf.commitIndex = maxInt64(rf.commitIndex, len)
+						rf.ApplyChan <- msg
+						lg.Infof("[%d] leader commits log at %d", rf.me, i)
+					}
+					rf.firstCommit = 1
+				} else {
+					//tome : might commit entries from previous term!
+					msg := ApplyMsg{
+						CommandValid: true,
+						Command:      rf.entries[cur].Data,
+						CommandIndex: int(cur),
+					}
+					rf.ApplyChan <- msg
+					lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 				}
-				// rf.commitIndex = maxInt64(rf.commitIndex, len)
-				rf.ApplyChan <- msg
+				rf.applyChanIndex[rf.me] = cur
+
 			}
 		}
 
@@ -537,6 +557,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimeout = time.NewTimer(genRandomElectionTimeout())
 	rf.entries = []LogEntry{{Term: 0, Data: -1}}
 	rf.nextIndex = make([]int64, len(rf.peers))
+	rf.applyChanIndex = make([]int64, len(rf.peers))
 	rf.matchIndex = make([]int64, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = 1
