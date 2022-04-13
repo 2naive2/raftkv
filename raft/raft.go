@@ -265,16 +265,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
+	index := 0
 	rf.mu.Lock()
 	rf.entries = append(rf.entries, entry)
-	rf.mu.Unlock()
 	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
+	index = len(rf.entries) - 1
+	rf.mu.Unlock()
 
 	// immediate begin to sync log to followers
 	rf.syncLogTimeout.Stop()
 	rf.syncLogTimeout.Reset(0)
 
-	return len(rf.entries) - 1, int(rf.currentTerm), true
+	return index, int(rf.currentTerm), true
 }
 
 //
@@ -302,6 +304,7 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 
 func (rf *Raft) sendHeartBeatToAllServer() {
+	rf.mu.Lock()
 	req := AppendEntryRequest{
 		Term:         atomic.LoadInt64(&rf.currentTerm),
 		LeaderID:     int64(rf.me),
@@ -310,6 +313,7 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 		Entries:      []LogEntry{},
 		LeaderCommit: rf.commitIndex,
 	}
+	rf.mu.Unlock()
 	resps := make([]AppendEntryResponse, len(rf.peers))
 
 	var wg sync.WaitGroup
@@ -427,6 +431,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
+//! single threaded
 func (rf *Raft) syncLogs() {
 	syncing := make([]int64, len(rf.peers))
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
@@ -435,6 +440,7 @@ func (rf *Raft) syncLogs() {
 			return
 		}
 
+		rf.mu.Lock() // protect entries
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -445,23 +451,25 @@ func (rf *Raft) syncLogs() {
 					continue
 				}
 				go func(i int) {
+					//prevent multiple sync to same server
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
 					atomic.StoreInt64(&syncing[i], 1)
 					for {
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						entries := rf.entries[rf.nextIndex[i]:]
+						toBeSentEntries := rf.entries[rf.nextIndex[i]:]
 						req := AppendEntryRequest{
 							Term:         rf.currentTerm,
 							LeaderID:     int64(rf.me),
 							PrevLogIndex: rf.nextIndex[i] - 1,
 							PrevLogTerm:  rf.entries[rf.nextIndex[i]-1].Term,
-							Entries:      entries,
+							Entries:      toBeSentEntries,
 							LeaderCommit: rf.commitIndex,
 						}
 						resp := AppendEntryResponse{}
 						if !rf.sendAppendEntries(i, &req, &resp) {
 							continue
 						}
+						// lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
 						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
 							// immediately terminal sync log thread
 							rf.syncLogTimeout.Stop()
@@ -484,6 +492,7 @@ func (rf *Raft) syncLogs() {
 				}(i)
 			}
 		}
+		rf.mu.Unlock()
 
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
@@ -492,7 +501,7 @@ func (rf *Raft) syncLogs() {
 func (rf *Raft) updateCommitIndex() {
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 		<-rf.updateCommitIndexTimeout.C
-
+		rf.mu.Lock()
 		for cur := rf.commitIndex + 1; int(cur) < len(rf.entries); cur++ {
 			if rf.entries[cur].Term != rf.currentTerm {
 				continue
@@ -536,6 +545,7 @@ func (rf *Raft) updateCommitIndex() {
 			}
 		}
 
+		rf.mu.Unlock()
 		rf.updateCommitIndexTimeout.Reset(UpdateCommitIndexinterval)
 	}
 }

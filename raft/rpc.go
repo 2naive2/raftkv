@@ -60,6 +60,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
 		resp.Success = false
+		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d", rf.me, rf.currentTerm, req.Term)
 		return
 	}
 
@@ -69,16 +70,14 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 
 	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 
+	rf.mu.Lock()
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
+		lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
 		return
 	}
-
-	// append new entries *
-	//
-	//
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
-	// lg.Infof("[%d] entries:%v", rf.me, rf.entries)
+	rf.mu.Unlock()
 
 	// todo consider resend to channel
 	if req.LeaderCommit > rf.commitIndex {
