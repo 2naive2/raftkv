@@ -111,7 +111,9 @@ type Raft struct {
 	syncLogTimeout           *time.Timer
 	updateCommitIndexTimeout *time.Timer
 	nextIndex                []int64
+	nextIndexMu              sync.Mutex
 	matchIndex               []int64
+	matchIndexMu             sync.Mutex
 
 	applyChanIndex []int64
 	firstCommit    int64
@@ -237,7 +239,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
-		if reply.Term > rf.currentTerm {
+		if reply.Term > atomic.LoadInt64(&rf.currentTerm) {
 			atomic.StoreInt64(&rf.currentTerm, reply.Term)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 		}
@@ -261,7 +263,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
-		return -1, int(rf.currentTerm), false
+		return -1, int(atomic.LoadInt64(&rf.currentTerm)), false
 	}
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
@@ -276,7 +278,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.syncLogTimeout.Stop()
 	rf.syncLogTimeout.Reset(0)
 
-	return index, int(rf.currentTerm), true
+	return index, int(atomic.LoadInt64(&rf.currentTerm)), true
 }
 
 //
@@ -304,39 +306,30 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 
 func (rf *Raft) sendHeartBeatToAllServer() {
-	rf.mu.Lock()
-	req := AppendEntryRequest{
-		Term:         atomic.LoadInt64(&rf.currentTerm),
-		LeaderID:     int64(rf.me),
-		PrevLogIndex: int64(len(rf.entries) - 1),
-		PrevLogTerm:  rf.entries[len(rf.entries)-1].Term,
-		Entries:      []LogEntry{},
-		LeaderCommit: rf.commitIndex,
-	}
-	rf.mu.Unlock()
-	resps := make([]AppendEntryResponse, len(rf.peers))
-
-	var wg sync.WaitGroup
-	wg.Add(len(rf.peers) - 1)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(i int) {
-			rf.sendAppendEntries(i, &req, &resps[i])
-			wg.Done()
+			rf.mu.Lock()
+			rf.nextIndexMu.Lock()
+			req := AppendEntryRequest{
+				Term:         atomic.LoadInt64(&rf.currentTerm),
+				LeaderID:     int64(rf.me),
+				PrevLogIndex: rf.nextIndex[i] - 1,
+				PrevLogTerm:  rf.entries[rf.nextIndex[i]-1].Term,
+				Entries:      []LogEntry{},
+				LeaderCommit: rf.commitIndex,
+			}
+			rf.nextIndexMu.Unlock()
+			rf.mu.Unlock()
+			resp := AppendEntryResponse{}
+			//tome
+			if atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+				rf.sendAppendEntries(i, &req, &resp)
+			}
 		}(i)
 	}
-	wg.Wait()
-
-	for _, resp := range resps {
-		if resp.Term > atomic.LoadInt64(&rf.currentTerm) {
-			atomic.StoreInt64(&rf.currentTerm, resp.Term)
-			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-			lg.Infof("[%d] leader invalidated due to higher term ,server term:%d ,leader term:%d", rf.me, resp.Term, rf.currentTerm)
-		}
-	}
-
 }
 
 func (rf *Raft) heartBeat() {
@@ -367,14 +360,16 @@ func (rf *Raft) ticker() {
 		votes := 1
 		finished := 0
 		// vote for myself
-		voteMutex := sync.Mutex{}
-		cond := sync.NewCond(&voteMutex)
-		for i := range rf.peers {
+		var voteMu sync.Mutex
+		cond := sync.NewCond(&voteMu)
+		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
 			go func(i int) {
+				rf.mu.Lock()
 				lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
+				rf.mu.Unlock()
 				req := RequestVoteArgs{
 					Term:         rf.currentTerm,
 					CandidateID:  int64(rf.me),
@@ -383,25 +378,28 @@ func (rf *Raft) ticker() {
 				}
 				resp := RequestVoteReply{}
 				ok := rf.sendRequestVote(i, &req, &resp)
-				voteMutex.Lock()
-				defer voteMutex.Unlock()
+				voteMu.Lock()
 				if ok && resp.VoteGranted {
 					votes++
 				}
 				finished++
+				voteMu.Unlock()
 				cond.Broadcast()
 			}(i)
 		}
 
-		voteMutex.Lock()
+		grantedVotes := 0
+		voteMu.Lock()
 		for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
 			cond.Wait()
+			grantedVotes = votes
 		}
+		voteMu.Unlock()
 
 		//* a candidate could revert to follower due to a higher term in response
 		//todo : consider atomicity
-		if votes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
-			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), votes)
+		if grantedVotes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
+			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
 			// reinitialize voloatile state
 			for i := 0; i < len(rf.peers); i++ {
@@ -425,7 +423,6 @@ func (rf *Raft) ticker() {
 		} else {
 			lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		}
-		voteMutex.Unlock()
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
@@ -437,6 +434,7 @@ func (rf *Raft) syncLogs() {
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 		<-rf.syncLogTimeout.C
 		if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+			lg.Warnf("[%d] is deprected from leader", rf.me)
 			return
 		}
 
@@ -452,24 +450,29 @@ func (rf *Raft) syncLogs() {
 				}
 				go func(i int) {
 					//prevent multiple sync to same server
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
 					atomic.StoreInt64(&syncing[i], 1)
 					for {
+						rf.mu.Lock()
 						toBeSentEntries := rf.entries[rf.nextIndex[i]:]
 						req := AppendEntryRequest{
-							Term:         rf.currentTerm,
+							Term:         atomic.LoadInt64(&rf.currentTerm),
 							LeaderID:     int64(rf.me),
 							PrevLogIndex: rf.nextIndex[i] - 1,
 							PrevLogTerm:  rf.entries[rf.nextIndex[i]-1].Term,
 							Entries:      toBeSentEntries,
 							LeaderCommit: rf.commitIndex,
 						}
+						index := len(rf.entries)
+						rf.mu.Unlock()
 						resp := AppendEntryResponse{}
+						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+							return
+						}
 						if !rf.sendAppendEntries(i, &req, &resp) {
 							continue
 						}
-						// lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
+
+						lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
 						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
 							// immediately terminal sync log thread
 							rf.syncLogTimeout.Stop()
@@ -477,8 +480,12 @@ func (rf *Raft) syncLogs() {
 							break
 						}
 						if resp.Success {
-							rf.nextIndex[i] = int64(len(rf.entries))
-							rf.matchIndex[i] = int64(len(rf.entries)) - 1
+							rf.nextIndexMu.Lock()
+							rf.nextIndex[i] = int64(index)
+							rf.nextIndexMu.Unlock()
+							rf.matchIndexMu.Lock()
+							rf.matchIndex[i] = int64(index) - 1
+							rf.matchIndexMu.Unlock()
 							// immediate issue an round of checks to update leader commit
 							rf.updateCommitIndexTimeout.Stop()
 							rf.updateCommitIndexTimeout.Reset(0)
@@ -496,6 +503,7 @@ func (rf *Raft) syncLogs() {
 
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
+	lg.Warnf("[%d] is deprected from leader", rf.me)
 }
 
 func (rf *Raft) updateCommitIndex() {
@@ -511,9 +519,11 @@ func (rf *Raft) updateCommitIndex() {
 				if i == rf.me {
 					continue
 				}
+				rf.matchIndexMu.Lock()
 				if rf.matchIndex[i] >= cur {
 					replicated++
 				}
+				rf.matchIndexMu.Unlock()
 			}
 			if replicated > len(rf.peers)/2 {
 				rf.commitIndex = cur

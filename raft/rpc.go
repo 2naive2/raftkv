@@ -21,6 +21,7 @@ type RequestVoteReply struct {
 // stub impl for RequestVite
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// transition to a new term
+	reply.Term = atomic.LoadInt64(&rf.currentTerm)
 	//todo: consider logIndex
 	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, args.Term)
@@ -30,7 +31,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if (rf.votedFor != nil && *rf.votedFor == args.CandidateID) || (rf.votedFor == nil && tuppleBigger(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1))) {
+
+	lg.Infof("[%d] tuple: entries:%v, %d %d %d %d", rf.me, rf.entries, args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1))
+	if !tuppleBigger(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
+		return
+	}
+
+	if rf.votedFor == nil || (rf.votedFor != nil && *rf.votedFor == args.CandidateID) {
 		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		voteID := args.CandidateID
@@ -39,7 +46,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout.Stop()
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
-	reply.Term = atomic.LoadInt64(&rf.currentTerm)
 }
 
 type AppendEntryRequest struct {
@@ -60,7 +66,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
 		resp.Success = false
-		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d", rf.me, rf.currentTerm, req.Term)
+		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
 		return
 	}
 
@@ -74,6 +80,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
 		lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
+		rf.mu.Unlock()
 		return
 	}
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
@@ -89,7 +96,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
-			lg.Infof("[%d] follower commits log at %d", rf.me, i)
+			lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
 		}
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
