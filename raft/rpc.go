@@ -25,7 +25,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, args.Term)
 		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-		rf.votedFor = nil
+		rf.votedFor = -1
+		rf.persist()
 	}
 	reply.Term = atomic.LoadInt64(&rf.currentTerm)
 
@@ -36,11 +37,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if rf.votedFor == nil || (rf.votedFor != nil && *rf.votedFor == args.CandidateID) {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
-		voteID := args.CandidateID
-		rf.votedFor = &voteID
+		rf.votedFor = args.CandidateID
+		rf.persist()
 
 		rf.electionTimeout.Stop()
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
@@ -71,6 +72,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 
 	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, req.Term)
+		rf.persist()
 	}
 
 	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))

@@ -97,7 +97,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	currentTerm int64
-	votedFor    *int64
+	votedFor    int64
 	entries     []LogEntry
 	state       RaftState
 
@@ -136,7 +136,7 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
+	e.Encode(atomic.LoadInt64(&rf.currentTerm))
 	e.Encode(rf.votedFor)
 	e.Encode(rf.entries)
 	data := w.Bytes()
@@ -154,7 +154,7 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	term := int64(0)
-	var votedFor *int64
+	var votedFor int64
 	entries := []LogEntry{}
 
 	if d.Decode(&term) != nil ||
@@ -230,6 +230,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if reply.Term > atomic.LoadInt64(&rf.currentTerm) {
 			atomic.StoreInt64(&rf.currentTerm, reply.Term)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+			rf.persist()
 		}
 		return res
 	}
@@ -248,6 +249,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 		if reply.Term > atomic.LoadInt64(&rf.currentTerm) {
 			atomic.StoreInt64(&rf.currentTerm, reply.Term)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
+			rf.persist()
 		}
 		return res
 	}
@@ -276,6 +278,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := 0
 	rf.mu.Lock()
 	rf.entries = append(rf.entries, entry)
+	rf.persist()
 	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 	index = len(rf.entries) - 1
 	rf.mu.Unlock()
@@ -364,9 +367,9 @@ func (rf *Raft) ticker() {
 		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateCandidate))
 		atomic.AddInt64(&rf.currentTerm, 1)
 		rf.mu.Lock()
-		voteFor := int64(rf.me)
-		rf.votedFor = &voteFor
+		rf.votedFor = int64(rf.me)
 		rf.mu.Unlock()
+		rf.persist()
 		votes := 1
 		finished := 0
 		// vote for myself
@@ -480,7 +483,6 @@ func (rf *Raft) syncLogs() {
 							Entries:      toBeSentEntries,
 							LeaderCommit: rf.commitIndex,
 						}
-						index := len(rf.entries)
 						rf.mu.Unlock()
 						resp := AppendEntryResponse{}
 						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
@@ -499,19 +501,19 @@ func (rf *Raft) syncLogs() {
 						}
 						if resp.Success {
 							rf.nextIndexMu.Lock()
-							rf.nextIndex[i] = int64(index)
+							rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(toBeSentEntries))
 							rf.nextIndexMu.Unlock()
 							rf.matchIndexMu.Lock()
-							rf.matchIndex[i] = int64(index) - 1
+							rf.matchIndex[i] = req.PrevLogIndex + int64(len(toBeSentEntries))
 							rf.matchIndexMu.Unlock()
 							// immediate issue an round of checks to update leader commit
 							rf.updateCommitIndexTimeout.Stop()
 							rf.updateCommitIndexTimeout.Reset(0)
 							break
 						} else {
-							lg.Infof("[%d] detect inconsistency in [%d],cur nextIndex:%d", rf.me, i, rf.nextIndex[i])
 							rf.nextIndexMu.Lock()
-							rf.nextIndex[i]--
+							rf.nextIndex[i] = req.PrevLogIndex
+							lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
 							rf.nextIndexMu.Unlock()
 						}
 					}
@@ -601,6 +603,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.ApplyChan = applyCh
+	rf.votedFor = -1
 
 	rf.electionTimeout = time.NewTimer(genRandomElectionTimeout())
 	rf.entries = []LogEntry{{Term: 0, Data: -1}}
