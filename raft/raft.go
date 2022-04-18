@@ -28,12 +28,12 @@ import (
 	//	"6.824/labgob"
 	"6.824/labgob"
 	"6.824/labrpc"
-	lg "github.com/sirupsen/logrus"
+	//lg "github.com/sirupsen/logrus"
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	lg.SetFormatter(&lg.TextFormatter{FullTimestamp: true})
+	//lg.SetFormatter(&//lg.TextFormatter{FullTimestamp: true})
 }
 
 //
@@ -73,7 +73,7 @@ var (
 )
 
 var (
-	HeartBeatInterval         = time.Millisecond * 100
+	HeartBeatInterval         = time.Millisecond * 50
 	ElectionMinTime           = time.Millisecond * 300
 	ElectionDeltaTime         = 300
 	RPCTimeout                = time.Millisecond * 300
@@ -128,6 +128,11 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(atomic.LoadInt64(&rf.currentTerm)), atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader)
 }
 
+func (rf *Raft) becomeFollower() {
+	rf.state = RaftStateFollwer
+
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -159,12 +164,12 @@ func (rf *Raft) readPersist(data []byte) {
 
 	if d.Decode(&term) != nil ||
 		d.Decode(&votedFor) != nil || d.Decode(&entries) != nil {
-		lg.Error("decode from persistent state failed")
+		//lg.Error("decode from persistent state failed")
 	} else {
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.entries = entries
-		lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
+		//lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
 	}
 }
 
@@ -279,7 +284,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	rf.entries = append(rf.entries, entry)
 	rf.persist()
-	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
+	//lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 	index = len(rf.entries) - 1
 	rf.mu.Unlock()
 
@@ -363,7 +368,7 @@ func (rf *Raft) ticker() {
 			rf.electionTimeout.Reset(genRandomElectionTimeout())
 			continue
 		}
-		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		//lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateCandidate))
 		atomic.AddInt64(&rf.currentTerm, 1)
 		rf.mu.Lock()
@@ -412,7 +417,7 @@ func (rf *Raft) ticker() {
 		//* a candidate could revert to follower due to a higher term in response
 		//todo : consider atomicity
 		if grantedVotes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
-			lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
+			//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
 			// reinitialize voloatile state
 			rf.nextIndexMu.Lock()
@@ -438,7 +443,7 @@ func (rf *Raft) ticker() {
 			go rf.updateCommitIndex()
 			rf.firstCommit = 0
 		} else {
-			lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+			//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		}
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
@@ -451,7 +456,7 @@ func (rf *Raft) syncLogs() {
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
 		<-rf.syncLogTimeout.C
 		if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
-			lg.Warnf("[%d] is deprected from leader", rf.me)
+			//lg.Warnf("[%d] is deprected from leader", rf.me)
 			return
 		}
 
@@ -492,7 +497,7 @@ func (rf *Raft) syncLogs() {
 							continue
 						}
 
-						lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
+						//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
 						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
 							// immediately terminal sync log thread
 							rf.syncLogTimeout.Stop()
@@ -513,7 +518,7 @@ func (rf *Raft) syncLogs() {
 						} else {
 							rf.nextIndexMu.Lock()
 							rf.nextIndex[i] = req.PrevLogIndex
-							lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
+							//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
 							rf.nextIndexMu.Unlock()
 						}
 					}
@@ -526,7 +531,7 @@ func (rf *Raft) syncLogs() {
 
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
-	lg.Warnf("[%d] is deprected from leader", rf.me)
+	//lg.Warnf("[%d] is deprected from leader", rf.me)
 }
 
 func (rf *Raft) updateCommitIndex() {
@@ -560,7 +565,7 @@ func (rf *Raft) updateCommitIndex() {
 						}
 						// rf.commitIndex = maxInt64(rf.commitIndex, len)
 						rf.ApplyChan <- msg
-						lg.Infof("[%d] leader commits log at %d", rf.me, i)
+						//lg.Infof("[%d] leader commits log at %d", rf.me, i)
 					}
 					rf.firstCommit = 1
 				} else {
@@ -571,7 +576,7 @@ func (rf *Raft) updateCommitIndex() {
 						CommandIndex: int(cur),
 					}
 					rf.ApplyChan <- msg
-					lg.Infof("[%d] leader commits log at %d", rf.me, cur)
+					//lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 				}
 				rf.applyChanIndex[rf.me] = cur
 

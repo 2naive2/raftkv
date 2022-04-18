@@ -2,8 +2,7 @@ package raft
 
 import (
 	"sync/atomic"
-
-	lg "github.com/sirupsen/logrus"
+	//lg "github.com/sirupsen/logrus"
 )
 
 type RequestVoteArgs struct {
@@ -38,7 +37,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
+		//lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.persist()
@@ -66,7 +65,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
 		resp.Success = false
-		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
+		//lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
 		return
 	}
 
@@ -80,13 +79,25 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	rf.mu.Lock()
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
-		// lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
+		//! delete conflicting entries
+		if len(rf.entries)-1 >= int(req.PrevLogIndex) {
+			rf.entries = rf.entries[:req.PrevLogIndex]
+		}
+		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
 		rf.mu.Unlock()
 		return
 	}
+
+	lastSharedIndex := minInt64(int64(len(rf.entries))-1, req.PrevLogIndex+int64(len(req.Entries)))
+	for i := req.PrevLogIndex + 1; i <= lastSharedIndex; i++ {
+		rf.entries[i] = req.Entries[i-req.PrevLogIndex-1]
+	}
+	if int(req.PrevLogIndex)+len(req.Entries) > len(rf.entries) {
+		rf.entries = append(rf.entries, req.Entries[lastSharedIndex-req.PrevLogIndex:]...)
+	}
+
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
 
-	// todo consider resend to channel
 	if req.LeaderCommit > rf.commitIndex {
 		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))
 		for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
@@ -96,7 +107,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
-			lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
+			//lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
 		}
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
@@ -105,7 +116,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 
 	resp.Success = true
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
-	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
+	// //lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
 }
