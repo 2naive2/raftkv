@@ -73,13 +73,13 @@ var (
 )
 
 var (
-	HeartBeatInterval         = time.Millisecond * 50
+	HeartBeatInterval         = time.Millisecond * 100
 	ElectionMinTime           = time.Millisecond * 300
 	ElectionDeltaTime         = 300
 	RPCTimeout                = time.Millisecond * 300
 	RPCRetryInterval          = time.Millisecond * 100
-	SyncLoginterval           = time.Millisecond * 10
-	UpdateCommitIndexinterval = time.Millisecond * 10
+	SyncLoginterval           = time.Millisecond * 50
+	UpdateCommitIndexinterval = time.Millisecond * 50
 )
 
 //
@@ -106,20 +106,33 @@ type Raft struct {
 
 	electionTimeout  *time.Timer
 	heartBeatTimeout *time.Timer
-	updateCommitMu   sync.Mutex
-	heartBeatMu      sync.Mutex
 
 	ApplyChan chan ApplyMsg
 
 	syncLogTimeout           *time.Timer
 	updateCommitIndexTimeout *time.Timer
 	nextIndex                []int64
-	nextIndexMu              sync.Mutex
 	matchIndex               []int64
-	matchIndexMu             sync.Mutex
 
 	applyChanIndex []int64
 	firstCommit    int64
+}
+
+type SafeTimer struct {
+	mu sync.Mutex
+	*time.Timer
+}
+
+func (s *SafeTimer) Reset(dur time.Duration) {
+	s.mu.Lock()
+	s.Reset(dur)
+	s.mu.Unlock()
+}
+
+func (s *SafeTimer) Wait() {
+	s.mu.Lock()
+	<-s.C
+	s.mu.Unlock()
 }
 
 // return currentTerm and whether this server
@@ -130,7 +143,34 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) becomeFollower() {
 	rf.state = RaftStateFollwer
+}
 
+func (rf *Raft) becomeLeader() {
+	rf.state = RaftStateLeader
+	// reinitialize voloatile state
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i] = 0
+		rf.nextIndex[i] = int64(len(rf.entries))
+	}
+
+	// start heart beat (periodically send heart beat to all servers)
+	// for this turn,immediatelly trigger a heart beat to be sent
+	// send heart beat to all server to establish
+	// authority
+	rf.heartBeatTimeout = time.NewTimer(0)
+	go rf.heartBeat()
+	rf.syncLogTimeout = time.NewTimer(0)
+	go rf.syncLogs()
+	rf.updateCommitIndexTimeout = time.NewTimer(0)
+	go rf.updateCommitIndex()
+	rf.firstCommit = 0
+}
+
+func (rf *Raft) becomeCandidate() {
+	rf.state = RaftStateCandidate
+	rf.currentTerm++
+	rf.votedFor = int64(rf.me)
+	rf.persist()
 }
 
 //
@@ -275,24 +315,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != RaftStateLeader {
 		return -1, int(atomic.LoadInt64(&rf.currentTerm)), false
 	}
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
-	index := 0
-	rf.mu.Lock()
 	rf.entries = append(rf.entries, entry)
-	rf.persist()
 	//lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
-	index = len(rf.entries) - 1
-	rf.mu.Unlock()
 
 	// immediate begin to sync log to followers
 	rf.syncLogTimeout.Stop()
 	rf.syncLogTimeout.Reset(0)
 
-	return index, int(atomic.LoadInt64(&rf.currentTerm)), true
+	return len(rf.entries) - 1, int(atomic.LoadInt64(&rf.currentTerm)), true
 }
 
 //
@@ -326,14 +363,12 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 		}
 		go func(i int) {
 			rf.mu.Lock()
-			rf.nextIndexMu.Lock()
-			actualIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1))
-			rf.nextIndexMu.Unlock()
+			prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1))
 			req := AppendEntryRequest{
 				Term:         atomic.LoadInt64(&rf.currentTerm),
 				LeaderID:     int64(rf.me),
-				PrevLogIndex: actualIndex,
-				PrevLogTerm:  rf.entries[actualIndex].Term,
+				PrevLogIndex: prevIndex,
+				PrevLogTerm:  rf.entries[prevIndex].Term,
 				Entries:      []LogEntry{},
 				LeaderCommit: rf.commitIndex,
 			}
@@ -349,16 +384,59 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 
 func (rf *Raft) heartBeat() {
 	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
-		rf.heartBeatMu.Lock()
-		timeout := rf.heartBeatTimeout.C
-		rf.heartBeatMu.Unlock()
-		<-timeout
+		<-rf.heartBeatTimeout.C
 		// send HeartBeat
 		go rf.sendHeartBeatToAllServer()
-		rf.heartBeatMu.Lock()
 		rf.heartBeatTimeout.Reset(HeartBeatInterval)
-		rf.heartBeatMu.Unlock()
 	}
+}
+
+func (rf *Raft) startAnElection() {
+	votes := 1
+	finished := 0
+	var voteMu sync.Mutex
+	cond := sync.NewCond(&voteMu)
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(i int) {
+			rf.mu.Lock()
+			lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
+			rf.mu.Unlock()
+			req := RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateID:  int64(rf.me),
+				LastLogIndex: lastLog,
+				LastLogTerm:  lastTerm,
+			}
+			resp := RequestVoteReply{}
+			ok := rf.sendRequestVote(i, &req, &resp)
+			voteMu.Lock()
+			if ok && resp.VoteGranted {
+				votes++
+			}
+			finished++
+			voteMu.Unlock()
+			cond.Broadcast()
+		}(i)
+	}
+
+	grantedVotes := 0
+	voteMu.Lock()
+	defer voteMu.Unlock()
+	for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
+		cond.Wait()
+		grantedVotes = votes
+	}
+
+	if grantedVotes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
+		rf.becomeLeader()
+		//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
+	} else {
+		//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+	}
+
 }
 
 func (rf *Raft) ticker() {
@@ -369,82 +447,12 @@ func (rf *Raft) ticker() {
 			continue
 		}
 		//lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
-		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateCandidate))
-		atomic.AddInt64(&rf.currentTerm, 1)
 		rf.mu.Lock()
-		rf.votedFor = int64(rf.me)
+		rf.becomeCandidate()
 		rf.mu.Unlock()
-		rf.persist()
-		votes := 1
-		finished := 0
-		// vote for myself
-		var voteMu sync.Mutex
-		cond := sync.NewCond(&voteMu)
-		for i := 0; i < len(rf.peers); i++ {
-			if i == rf.me {
-				continue
-			}
-			go func(i int) {
-				rf.mu.Lock()
-				lastLog, lastTerm := int64(len(rf.entries)-1), rf.entries[len(rf.entries)-1].Term
-				rf.mu.Unlock()
-				req := RequestVoteArgs{
-					Term:         rf.currentTerm,
-					CandidateID:  int64(rf.me),
-					LastLogIndex: lastLog,
-					LastLogTerm:  lastTerm,
-				}
-				resp := RequestVoteReply{}
-				ok := rf.sendRequestVote(i, &req, &resp)
-				voteMu.Lock()
-				if ok && resp.VoteGranted {
-					votes++
-				}
-				finished++
-				voteMu.Unlock()
-				cond.Broadcast()
-			}(i)
-		}
 
-		grantedVotes := 0
-		voteMu.Lock()
-		for !(votes > len(rf.peers)/2 || finished == (len(rf.peers))-1) {
-			cond.Wait()
-			grantedVotes = votes
-		}
-		voteMu.Unlock()
-
-		//* a candidate could revert to follower due to a higher term in response
-		//todo : consider atomicity
-		if grantedVotes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
-			//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
-			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateLeader))
-			// reinitialize voloatile state
-			rf.nextIndexMu.Lock()
-			for i := 0; i < len(rf.peers); i++ {
-				rf.matchIndex[i] = 0
-				rf.nextIndex[i] = 1
-			}
-			rf.nextIndexMu.Unlock()
-
-			// start heart beat (periodically send heart beat to all servers)
-			// for this turn,immediatelly trigger a heart beat to be sent
-			// send heart beat to all server to establish
-			// authority
-			rf.heartBeatMu.Lock()
-			rf.heartBeatTimeout = time.NewTimer(0)
-			rf.heartBeatMu.Unlock()
-			go rf.heartBeat()
-			rf.syncLogTimeout = time.NewTimer(0)
-			go rf.syncLogs()
-			rf.updateCommitMu.Lock()
-			rf.updateCommitIndexTimeout = time.NewTimer(0)
-			rf.updateCommitMu.Unlock()
-			go rf.updateCommitIndex()
-			rf.firstCommit = 0
-		} else {
-			//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
-		}
+		// non-blocking,periodically issue an election when timer fires
+		go rf.startAnElection()
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
@@ -461,7 +469,6 @@ func (rf *Raft) syncLogs() {
 		}
 
 		rf.mu.Lock() // protect entries
-		rf.nextIndexMu.Lock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -474,11 +481,10 @@ func (rf *Raft) syncLogs() {
 				go func(i int) {
 					//prevent multiple sync to same server
 					atomic.StoreInt64(&syncing[i], 1)
+					defer atomic.StoreInt64(&syncing[i], 0)
 					for {
 						rf.mu.Lock()
-						rf.nextIndexMu.Lock()
 						actualIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1))
-						rf.nextIndexMu.Unlock()
 						toBeSentEntries := rf.entries[actualIndex+1:]
 						req := AppendEntryRequest{
 							Term:         atomic.LoadInt64(&rf.currentTerm),
@@ -504,29 +510,25 @@ func (rf *Raft) syncLogs() {
 							rf.syncLogTimeout.Reset(0)
 							break
 						}
+
+						rf.mu.Lock()
 						if resp.Success {
-							rf.nextIndexMu.Lock()
 							rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(toBeSentEntries))
-							rf.nextIndexMu.Unlock()
-							rf.matchIndexMu.Lock()
 							rf.matchIndex[i] = req.PrevLogIndex + int64(len(toBeSentEntries))
-							rf.matchIndexMu.Unlock()
 							// immediate issue an round of checks to update leader commit
 							rf.updateCommitIndexTimeout.Stop()
 							rf.updateCommitIndexTimeout.Reset(0)
+							rf.mu.Unlock()
 							break
 						} else {
-							rf.nextIndexMu.Lock()
 							rf.nextIndex[i] = req.PrevLogIndex
 							//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
-							rf.nextIndexMu.Unlock()
 						}
+						rf.mu.Unlock()
 					}
-					atomic.StoreInt64(&syncing[i], 0)
 				}(i)
 			}
 		}
-		rf.nextIndexMu.Unlock()
 		rf.mu.Unlock()
 
 		rf.syncLogTimeout.Reset(SyncLoginterval)
@@ -547,11 +549,9 @@ func (rf *Raft) updateCommitIndex() {
 				if i == rf.me {
 					continue
 				}
-				rf.matchIndexMu.Lock()
 				if rf.matchIndex[i] >= cur {
 					replicated++
 				}
-				rf.matchIndexMu.Unlock()
 			}
 			if replicated > len(rf.peers)/2 {
 				rf.commitIndex = cur
@@ -584,9 +584,7 @@ func (rf *Raft) updateCommitIndex() {
 		}
 
 		rf.mu.Unlock()
-		rf.updateCommitMu.Lock()
 		rf.updateCommitIndexTimeout.Reset(UpdateCommitIndexinterval)
-		rf.updateCommitMu.Unlock()
 	}
 }
 
