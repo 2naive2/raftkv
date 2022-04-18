@@ -21,18 +21,17 @@ type RequestVoteReply struct {
 // stub impl for RequestVite
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// transition to a new term
-	reply.Term = atomic.LoadInt64(&rf.currentTerm)
 	//todo: consider logIndex
 	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
 		atomic.StoreInt64(&rf.currentTerm, args.Term)
 		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 		rf.votedFor = nil
 	}
+	reply.Term = atomic.LoadInt64(&rf.currentTerm)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	lg.Infof("[%d] tuple: entries:%v, %d %d %d %d", rf.me, rf.entries, args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1))
 	if !tuppleBigger(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
 		return
 	}
@@ -84,7 +83,6 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		return
 	}
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
-	rf.mu.Unlock()
 
 	// todo consider resend to channel
 	if req.LeaderCommit > rf.commitIndex {
@@ -101,6 +99,8 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
 	}
+	rf.mu.Unlock()
+
 	resp.Success = true
 	resp.Term = atomic.LoadInt64(&rf.currentTerm)
 	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)

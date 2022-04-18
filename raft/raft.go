@@ -19,12 +19,14 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 	lg "github.com/sirupsen/logrus"
 )
@@ -131,14 +133,13 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.entries)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -148,18 +149,21 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	term := int64(0)
+	var votedFor *int64
+	entries := []LogEntry{}
+
+	if d.Decode(&term) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&entries) != nil {
+		lg.Error("decode from persistent state failed")
+	} else {
+		rf.currentTerm = term
+		rf.votedFor = votedFor
+		rf.entries = entries
+	}
 }
 
 //
@@ -306,7 +310,7 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 
 func (rf *Raft) sendHeartBeatToAllServer() {
-	for i := range rf.peers {
+	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
@@ -439,6 +443,7 @@ func (rf *Raft) syncLogs() {
 		}
 
 		rf.mu.Lock() // protect entries
+		rf.nextIndexMu.Lock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -499,6 +504,7 @@ func (rf *Raft) syncLogs() {
 				}(i)
 			}
 		}
+		rf.nextIndexMu.Unlock()
 		rf.mu.Unlock()
 
 		rf.syncLogTimeout.Reset(SyncLoginterval)
