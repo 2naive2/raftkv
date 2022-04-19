@@ -83,6 +83,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		if len(rf.entries)-1 >= int(req.PrevLogIndex) {
 			rf.entries = rf.entries[:req.PrevLogIndex]
 		}
+		rf.persist()
 		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
 		rf.mu.Unlock()
 		return
@@ -97,6 +98,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	}
 
 	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
+	rf.persist()
 
 	if req.LeaderCommit > rf.commitIndex {
 		newCommitIndex := minInt64(req.LeaderCommit, int64(len(rf.entries)-1))

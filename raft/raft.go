@@ -209,7 +209,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.entries = entries
-		//lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
+		//lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.enties)
 	}
 }
 
@@ -323,6 +323,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
+	rf.persist()
 	//lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 
 	// immediate begin to sync log to followers
@@ -363,7 +364,7 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 		}
 		go func(i int) {
 			rf.mu.Lock()
-			prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1))
+			prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1)) // its log may has chanegd from when its nextIndex was set
 			req := AppendEntryRequest{
 				Term:         atomic.LoadInt64(&rf.currentTerm),
 				LeaderID:     int64(rf.me),
