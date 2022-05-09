@@ -118,38 +118,24 @@ type Raft struct {
 	firstCommit    int64
 }
 
-type SafeTimer struct {
-	mu sync.Mutex
-	*time.Timer
-}
-
-func (s *SafeTimer) Reset(dur time.Duration) {
-	s.mu.Lock()
-	s.Reset(dur)
-	s.mu.Unlock()
-}
-
-func (s *SafeTimer) Wait() {
-	s.mu.Lock()
-	<-s.C
-	s.mu.Unlock()
-}
-
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	return int(atomic.LoadInt64(&rf.currentTerm)), atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader)
 }
 
-func (rf *Raft) becomeFollower() {
+func (rf *Raft) becomeFollower(term int64) {
 	rf.state = RaftStateFollwer
+	rf.currentTerm = term
+	rf.votedFor = -1
+	rf.persist()
 }
 
 func (rf *Raft) becomeLeader() {
 	rf.state = RaftStateLeader
+
 	// reinitialize voloatile state
 	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i] = 0
 		rf.nextIndex[i] = int64(len(rf.entries))
 	}
 
