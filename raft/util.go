@@ -44,3 +44,9 @@ func tuppleBigger(a1, a2, b1, b2 int64) bool {
 	}
 	return false
 }
+
+func copyLog(log []LogEntry) []LogEntry {
+	newLog := make([]LogEntry, 0, len(log))
+	copy(newLog, log)
+	return newLog
+}

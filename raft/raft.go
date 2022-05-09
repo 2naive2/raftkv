@@ -349,7 +349,6 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 			continue
 		}
 		go func(i int) {
-			rf.mu.Lock()
 			prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1)) // its log may has chanegd from when its nextIndex was set
 			req := AppendEntryRequest{
 				Term:         atomic.LoadInt64(&rf.currentTerm),
@@ -359,21 +358,22 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 				Entries:      []LogEntry{},
 				LeaderCommit: rf.commitIndex,
 			}
-			rf.mu.Unlock()
 			resp := AppendEntryResponse{}
-			//tome
-			if atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
-				rf.sendAppendEntries(i, &req, &resp)
-			}
+			rf.sendAppendEntries(i, &req, &resp)
 		}(i)
 	}
 }
 
 func (rf *Raft) heartBeat() {
-	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+	for {
 		<-rf.heartBeatTimeout.C
-		// send HeartBeat
-		go rf.sendHeartBeatToAllServer()
+		rf.mu.Lock()
+		if rf.state != RaftStateLeader {
+			rf.mu.Unlock()
+			break
+		}
+		rf.sendHeartBeatToAllServer()
+		rf.mu.Unlock()
 		rf.heartBeatTimeout.Reset(HeartBeatInterval)
 	}
 }
@@ -417,29 +417,33 @@ func (rf *Raft) startAnElection() {
 		grantedVotes = votes
 	}
 
-	if grantedVotes > len(rf.peers)/2 && atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateCandidate) {
+	rf.mu.Lock()
+	if grantedVotes > len(rf.peers)/2 && rf.state == RaftStateCandidate {
 		rf.becomeLeader()
 		//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
 	} else {
 		//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 	}
-
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		<-rf.electionTimeout.C
-		if atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+
+		rf.mu.Lock()
+		if rf.state == RaftStateLeader {
+			rf.mu.Unlock()
 			rf.electionTimeout.Reset(genRandomElectionTimeout())
 			continue
 		}
+
 		//lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
-		rf.mu.Lock()
 		rf.becomeCandidate()
 		rf.mu.Unlock()
 
 		// non-blocking,periodically issue an election when timer fires
-		go rf.startAnElection()
+		rf.startAnElection()
 
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
@@ -448,73 +452,79 @@ func (rf *Raft) ticker() {
 //! single threaded
 func (rf *Raft) syncLogs() {
 	syncing := make([]int64, len(rf.peers))
-	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
+	for {
 		<-rf.syncLogTimeout.C
-		if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+		rf.mu.Lock()
+		if rf.state != RaftStateLeader {
 			//lg.Warnf("[%d] is deprected from leader", rf.me)
+			rf.mu.Unlock()
 			return
 		}
 
-		rf.mu.Lock() // protect entries
+		allSyncEntries := copyLog(rf.entries)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
 			}
 
-			if len(rf.entries)-1 >= int(rf.nextIndex[i]) {
-				if atomic.LoadInt64(&syncing[i]) == 1 {
-					continue
-				}
-				go func(i int) {
-					//prevent multiple sync to same server
-					atomic.StoreInt64(&syncing[i], 1)
-					defer atomic.StoreInt64(&syncing[i], 0)
-					for {
-						rf.mu.Lock()
-						actualIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1))
-						toBeSentEntries := rf.entries[actualIndex+1:]
-						req := AppendEntryRequest{
-							Term:         atomic.LoadInt64(&rf.currentTerm),
-							LeaderID:     int64(rf.me),
-							PrevLogIndex: actualIndex,
-							PrevLogTerm:  rf.entries[actualIndex].Term,
-							Entries:      toBeSentEntries,
-							LeaderCommit: rf.commitIndex,
-						}
-						rf.mu.Unlock()
-						resp := AppendEntryResponse{}
-						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
-							return
-						}
-						if !rf.sendAppendEntries(i, &req, &resp) {
-							continue
-						}
-
-						//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
-						if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
-							// immediately terminal sync log thread
-							rf.syncLogTimeout.Stop()
-							rf.syncLogTimeout.Reset(0)
-							break
-						}
-
-						rf.mu.Lock()
-						if resp.Success {
-							rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(toBeSentEntries))
-							rf.matchIndex[i] = req.PrevLogIndex + int64(len(toBeSentEntries))
-							// immediate issue an round of checks to update leader commit
-							rf.updateCommitIndexTimeout.Stop()
-							rf.updateCommitIndexTimeout.Reset(0)
-							rf.mu.Unlock()
-							break
-						} else {
-							rf.nextIndex[i] = req.PrevLogIndex
-							//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
-						}
-						rf.mu.Unlock()
-					}
-				}(i)
+			if len(rf.entries)-1 < int(rf.nextIndex[i]) {
+				continue
 			}
+
+			if atomic.LoadInt64(&syncing[i]) == 1 {
+				continue
+			}
+
+			lastLogIndex := rf.nextIndex[i]
+			lastLogTerm := rf.entries[lastLogIndex].Term
+			syncEntries := allSyncEntries[lastLogIndex:]
+
+			go func(i int, lastLogIndex, lastLogTerm int64, syncEntries []LogEntry) {
+				//prevent multiple sync to same server
+				atomic.StoreInt64(&syncing[i], 1)
+				defer atomic.StoreInt64(&syncing[i], 0)
+				for {
+
+					req := AppendEntryRequest{
+						Term:         atomic.LoadInt64(&rf.currentTerm),
+						LeaderID:     int64(rf.me),
+						PrevLogIndex: lastLogIndex,
+						PrevLogTerm:  lastLogTerm,
+						Entries:      syncEntries,
+						LeaderCommit: rf.commitIndex,
+					}
+					resp := AppendEntryResponse{}
+					if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+						return
+					}
+					if !rf.sendAppendEntries(i, &req, &resp) {
+						continue
+					}
+
+					//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
+					if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+						// immediately terminal sync log thread
+						rf.syncLogTimeout.Stop()
+						rf.syncLogTimeout.Reset(0)
+						break
+					}
+
+					rf.mu.Lock()
+					if resp.Success {
+						rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(toBeSentEntries))
+						rf.matchIndex[i] = req.PrevLogIndex + int64(len(toBeSentEntries))
+						// immediate issue an round of checks to update leader commit
+						rf.updateCommitIndexTimeout.Stop()
+						rf.updateCommitIndexTimeout.Reset(0)
+						rf.mu.Unlock()
+						break
+					} else {
+						rf.nextIndex[i] = req.PrevLogIndex
+						//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
+					}
+					rf.mu.Unlock()
+				}
+			}(i, lastLogIndex, lastLogTerm, syncEntries)
 		}
 		rf.mu.Unlock()
 
