@@ -424,7 +424,7 @@ func (rf *Raft) startAnElection() {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		<-rf.electionTimeout.C
 
 		rf.mu.Lock()
@@ -597,13 +597,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimeout = time.NewTimer(genRandomElectionTimeout())
 	rf.entries = []LogEntry{{Term: 0, Data: -1}}
 	rf.nextIndex = make([]int64, len(rf.peers))
-	rf.applyChanIndex = make([]int64, len(rf.peers))
 	rf.matchIndex = make([]int64, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = 1
 	}
 
-	// Your initialization code here (2A, 2B, 2C).
+	rf.applyChanIndex = make([]int64, len(rf.peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

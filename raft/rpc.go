@@ -1,9 +1,6 @@
 package raft
 
-import (
-	"sync/atomic"
-	//lg "github.com/sirupsen/logrus"
-)
+//lg "github.com/sirupsen/logrus"
 
 type RequestVoteArgs struct {
 	Term         int64
@@ -20,19 +17,15 @@ type RequestVoteReply struct {
 // stub impl for RequestVite
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// transition to a new term
-	//todo: consider logIndex
-	if args.Term > atomic.LoadInt64(&rf.currentTerm) {
-		atomic.StoreInt64(&rf.currentTerm, args.Term)
-		atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-		rf.votedFor = -1
-		rf.persist()
-	}
-	reply.Term = atomic.LoadInt64(&rf.currentTerm)
-
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if args.Term > rf.currentTerm {
+		rf.becomeFollower(args.Term)
+	}
 
-	if !tuppleBigger(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
+	reply.Term = rf.currentTerm
+
+	if !logNewer(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -45,6 +38,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout.Stop()
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
+
+	rf.mu.Unlock()
 }
 
 type AppendEntryRequest struct {
@@ -62,21 +57,20 @@ type AppendEntryResponse struct {
 }
 
 func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
-	resp.Term = atomic.LoadInt64(&rf.currentTerm)
-	if req.Term < atomic.LoadInt64(&rf.currentTerm) {
+	rf.mu.Lock()
+	resp.Term = rf.currentTerm
+	if req.Term < rf.currentTerm {
 		resp.Success = false
+		rf.mu.Unlock()
 		//lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
 		return
 	}
 
-	if req.Term > atomic.LoadInt64(&rf.currentTerm) {
-		atomic.StoreInt64(&rf.currentTerm, req.Term)
+	if req.Term > rf.currentTerm {
+		rf.becomeFollower(req.Term)
 		rf.persist()
 	}
 
-	atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
-
-	rf.mu.Lock()
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
 		//! delete conflicting entries
@@ -114,11 +108,11 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
 	}
-	rf.mu.Unlock()
 
 	resp.Success = true
-	resp.Term = atomic.LoadInt64(&rf.currentTerm)
-	// //lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
+	resp.Term = rf.currentTerm
+	rf.mu.Unlock()
+	//lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
 }
