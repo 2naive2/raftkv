@@ -73,13 +73,12 @@ var (
 )
 
 var (
-	HeartBeatInterval         = time.Millisecond * 100
-	ElectionMinTime           = time.Millisecond * 300
-	ElectionDeltaTime         = 300
-	RPCTimeout                = time.Millisecond * 300
-	RPCRetryInterval          = time.Millisecond * 100
-	SyncLoginterval           = time.Millisecond * 50
-	UpdateCommitIndexinterval = time.Millisecond * 50
+	HeartBeatInterval = time.Millisecond * 100
+	ElectionMinTime   = time.Millisecond * 300
+	ElectionDeltaTime = 300
+	RPCTimeout        = time.Millisecond * 300
+	RPCRetryInterval  = time.Millisecond * 100
+	SyncLoginterval   = time.Millisecond * 50
 )
 
 //
@@ -109,10 +108,9 @@ type Raft struct {
 
 	ApplyChan chan ApplyMsg
 
-	syncLogTimeout           *time.Timer
-	updateCommitIndexTimeout *time.Timer
-	nextIndex                []int64
-	matchIndex               []int64
+	syncLogTimeout *time.Timer
+	nextIndex      []int64
+	matchIndex     []int64
 
 	applyChanIndex []int64
 	firstCommit    int64
@@ -147,8 +145,6 @@ func (rf *Raft) becomeLeader() {
 	go rf.heartBeat()
 	rf.syncLogTimeout = time.NewTimer(0)
 	go rf.syncLogs()
-	rf.updateCommitIndexTimeout = time.NewTimer(0)
-	go rf.updateCommitIndex()
 	rf.firstCommit = 0
 }
 
@@ -461,7 +457,6 @@ func (rf *Raft) syncLogs() {
 			return
 		}
 
-		allSyncEntries := copyLog(rf.entries)
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
@@ -475,18 +470,23 @@ func (rf *Raft) syncLogs() {
 				continue
 			}
 
-			lastLogIndex := rf.nextIndex[i]
-			lastLogTerm := rf.entries[lastLogIndex].Term
-			syncEntries := allSyncEntries[lastLogIndex:]
-
-			go func(i int, lastLogIndex, lastLogTerm int64, syncEntries []LogEntry) {
+			go func(i int) {
 				//prevent multiple sync to same server
 				atomic.StoreInt64(&syncing[i], 1)
 				defer atomic.StoreInt64(&syncing[i], 0)
 				for {
+					rf.mu.Lock()
+					if rf.state != RaftStateLeader {
+						rf.mu.Unlock()
+						return
+					}
+					lastLogIndex := rf.nextIndex[i] - 1
+					lastLogTerm := rf.entries[lastLogIndex].Term
+					syncEntries := rf.entries[rf.nextIndex[i]:]
+					term := rf.currentTerm
 
 					req := AppendEntryRequest{
-						Term:         atomic.LoadInt64(&rf.currentTerm),
+						Term:         term,
 						LeaderID:     int64(rf.me),
 						PrevLogIndex: lastLogIndex,
 						PrevLogTerm:  lastLogTerm,
@@ -494,94 +494,83 @@ func (rf *Raft) syncLogs() {
 						LeaderCommit: rf.commitIndex,
 					}
 					resp := AppendEntryResponse{}
-					if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
-						return
-					}
+
+					rf.mu.Unlock()
 					if !rf.sendAppendEntries(i, &req, &resp) {
 						continue
 					}
 
 					//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
-					if atomic.LoadInt64((*int64)(&rf.state)) != int64(RaftStateLeader) {
+					rf.mu.Lock()
+					if rf.state != RaftStateLeader {
 						// immediately terminal sync log thread
-						rf.syncLogTimeout.Stop()
-						rf.syncLogTimeout.Reset(0)
-						break
+						rf.mu.Unlock()
+						return
 					}
 
-					rf.mu.Lock()
 					if resp.Success {
-						rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(toBeSentEntries))
-						rf.matchIndex[i] = req.PrevLogIndex + int64(len(toBeSentEntries))
+						rf.nextIndex[i] = req.PrevLogIndex + 1 + int64(len(syncEntries))
+						rf.matchIndex[i] = req.PrevLogIndex + int64(len(syncEntries))
 						// immediate issue an round of checks to update leader commit
-						rf.updateCommitIndexTimeout.Stop()
-						rf.updateCommitIndexTimeout.Reset(0)
+						updateCommitIndex(rf)
 						rf.mu.Unlock()
 						break
 					} else {
 						rf.nextIndex[i] = req.PrevLogIndex
 						//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
+						rf.mu.Unlock()
 					}
-					rf.mu.Unlock()
 				}
-			}(i, lastLogIndex, lastLogTerm, syncEntries)
+			}(i)
 		}
-		rf.mu.Unlock()
 
+		rf.mu.Unlock()
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
 	//lg.Warnf("[%d] is deprected from leader", rf.me)
 }
 
-func (rf *Raft) updateCommitIndex() {
-	for atomic.LoadInt64((*int64)(&rf.state)) == int64(RaftStateLeader) {
-		<-rf.updateCommitIndexTimeout.C
-		rf.mu.Lock()
-		for cur := rf.commitIndex + 1; int(cur) < len(rf.entries); cur++ {
-			if rf.entries[cur].Term != atomic.LoadInt64(&rf.currentTerm) {
+func updateCommitIndex(rf *Raft) {
+	for cur := rf.commitIndex + 1; int(cur) < len(rf.entries); cur++ {
+		if rf.entries[cur].Term != rf.currentTerm {
+			continue
+		}
+		replicated := 1
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
 				continue
 			}
-			replicated := 1
-			for i := 0; i < len(rf.peers); i++ {
-				if i == rf.me {
-					continue
-				}
-				if rf.matchIndex[i] >= cur {
-					replicated++
-				}
-			}
-			if replicated > len(rf.peers)/2 {
-				rf.commitIndex = cur
-				// * only update commit thread will access first-commit
-				if rf.firstCommit == 0 {
-					for i := rf.applyChanIndex[rf.me] + 1; i <= cur; i++ {
-						msg := ApplyMsg{
-							CommandValid: true,
-							Command:      rf.entries[i].Data,
-							CommandIndex: int(i),
-						}
-						// rf.commitIndex = maxInt64(rf.commitIndex, len)
-						rf.ApplyChan <- msg
-						//lg.Infof("[%d] leader commits log at %d", rf.me, i)
-					}
-					rf.firstCommit = 1
-				} else {
-					//tome : might commit entries from previous term!
-					msg := ApplyMsg{
-						CommandValid: true,
-						Command:      rf.entries[cur].Data,
-						CommandIndex: int(cur),
-					}
-					rf.ApplyChan <- msg
-					//lg.Infof("[%d] leader commits log at %d", rf.me, cur)
-				}
-				rf.applyChanIndex[rf.me] = cur
-
+			if rf.matchIndex[i] >= cur {
+				replicated++
 			}
 		}
-
-		rf.mu.Unlock()
-		rf.updateCommitIndexTimeout.Reset(UpdateCommitIndexinterval)
+		if replicated > len(rf.peers)/2 {
+			rf.commitIndex = cur
+			// * only update commit thread will access first-commit
+			if rf.firstCommit == 0 {
+				for i := rf.applyChanIndex[rf.me] + 1; i <= cur; i++ {
+					msg := ApplyMsg{
+						CommandValid: true,
+						Command:      rf.entries[i].Data,
+						CommandIndex: int(i),
+					}
+					// rf.commitIndex = maxInt64(rf.commitIndex, len)
+					rf.ApplyChan <- msg
+					//lg.Infof("[%d] leader commits log at %d", rf.me, i)
+				}
+				rf.firstCommit = 1
+			} else {
+				//tome : might commit entries from previous term!
+				msg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.entries[cur].Data,
+					CommandIndex: int(cur),
+				}
+				rf.ApplyChan <- msg
+				//lg.Infof("[%d] leader commits log at %d", rf.me, cur)
+			}
+			rf.applyChanIndex[rf.me] = cur
+		}
 	}
 }
 
