@@ -1,6 +1,8 @@
 package raft
 
-//lg "github.com/sirupsen/logrus"
+import (
+	lg "github.com/sirupsen/logrus"
+)
 
 type RequestVoteArgs struct {
 	Term         int64
@@ -34,7 +36,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-		//lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
+		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.persist()
@@ -64,9 +66,12 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	resp.Term = rf.currentTerm
 	if req.Term < rf.currentTerm {
 		resp.Success = false
-		//lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
+		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
 		return
 	}
+
+	rf.electionTimeout.Stop()
+	rf.electionTimeout.Reset(genRandomElectionTimeout())
 
 	if req.Term > rf.currentTerm {
 		rf.becomeFollower(req.Term)
@@ -75,7 +80,7 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
-		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
+		lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
 		return
 	}
 
@@ -101,14 +106,14 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
-			//lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
+			lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
 		}
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
 	}
 
 	resp.Success = true
-	//lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
+	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
 }

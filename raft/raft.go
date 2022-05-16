@@ -28,12 +28,12 @@ import (
 	//	"6.824/labgob"
 	"6.824/labgob"
 	"6.824/labrpc"
-	//lg "github.com/sirupsen/logrus"
+	lg "github.com/sirupsen/logrus"
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	//lg.SetFormatter(&//lg.TextFormatter{FullTimestamp: true})
+	lg.SetFormatter(&lg.TextFormatter{FullTimestamp: true})
 }
 
 //
@@ -186,12 +186,12 @@ func (rf *Raft) readPersist(data []byte) {
 
 	if d.Decode(&term) != nil ||
 		d.Decode(&votedFor) != nil || d.Decode(&entries) != nil {
-		//lg.Error("decode from persistent state failed")
+		lg.Error("decode from persistent state failed")
 	} else {
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.entries = entries
-		//lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.enties)
+		lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
 	}
 }
 
@@ -306,7 +306,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
 	rf.persist()
-	//lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
+	lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
 
 	// immediate begin to sync log to followers
 	rf.syncLogTimeout.Stop()
@@ -345,12 +345,12 @@ func (rf *Raft) sendHeartBeatToAllServer() {
 			continue
 		}
 		go func(i int) {
-			prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1)) // its log may has chanegd from when its nextIndex was set
+			// prevIndex := minInt64(rf.nextIndex[i]-1, int64(len(rf.entries)-1)) // its log may has chanegd from when its nextIndex was set
 			req := AppendEntryRequest{
 				Term:         atomic.LoadInt64(&rf.currentTerm),
 				LeaderID:     int64(rf.me),
-				PrevLogIndex: prevIndex,
-				PrevLogTerm:  rf.entries[prevIndex].Term,
+				PrevLogIndex: int64(len(rf.entries)) - 1,
+				PrevLogTerm:  rf.entries[len(rf.entries)-1].Term,
 				Entries:      []LogEntry{},
 				LeaderCommit: rf.commitIndex,
 			}
@@ -416,9 +416,9 @@ func (rf *Raft) startAnElection() {
 	rf.mu.Lock()
 	if grantedVotes > len(rf.peers)/2 && rf.state == RaftStateCandidate {
 		rf.becomeLeader()
-		//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
+		lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
 	} else {
-		//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 	}
 	rf.mu.Unlock()
 }
@@ -434,7 +434,7 @@ func (rf *Raft) ticker() {
 			continue
 		}
 
-		//lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		rf.becomeCandidate()
 		rf.mu.Unlock()
 
@@ -452,7 +452,7 @@ func (rf *Raft) syncLogs() {
 		<-rf.syncLogTimeout.C
 		rf.mu.Lock()
 		if rf.state != RaftStateLeader {
-			//lg.Warnf("[%d] is deprected from leader", rf.me)
+			lg.Warnf("[%d] is deprected from leader", rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -500,7 +500,7 @@ func (rf *Raft) syncLogs() {
 						continue
 					}
 
-					//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, toBeSentEntries, i)
+					lg.Infof("[%d] sync entries :%v to [%d]", rf.me, syncEntries, i)
 					rf.mu.Lock()
 					if rf.state != RaftStateLeader {
 						// immediately terminal sync log thread
@@ -517,7 +517,7 @@ func (rf *Raft) syncLogs() {
 						break
 					} else {
 						rf.nextIndex[i] = req.PrevLogIndex
-						//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
+						lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
 						rf.mu.Unlock()
 					}
 				}
@@ -527,7 +527,7 @@ func (rf *Raft) syncLogs() {
 		rf.mu.Unlock()
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
-	//lg.Warnf("[%d] is deprected from leader", rf.me)
+	lg.Warnf("[%d] is deprected from leader", rf.me)
 }
 
 func updateCommitIndex(rf *Raft) {
@@ -556,7 +556,7 @@ func updateCommitIndex(rf *Raft) {
 					}
 					// rf.commitIndex = maxInt64(rf.commitIndex, len)
 					rf.ApplyChan <- msg
-					//lg.Infof("[%d] leader commits log at %d", rf.me, i)
+					lg.Infof("[%d] leader commits log at %d", rf.me, i)
 				}
 				rf.firstCommit = 1
 			} else {
@@ -567,7 +567,7 @@ func updateCommitIndex(rf *Raft) {
 					CommandIndex: int(cur),
 				}
 				rf.ApplyChan <- msg
-				//lg.Infof("[%d] leader commits log at %d", rf.me, cur)
+				lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 			}
 			rf.applyChanIndex[rf.me] = cur
 		}
