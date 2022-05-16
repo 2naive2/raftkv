@@ -28,6 +28,13 @@ func minInt64(a, b int64) int64 {
 	return b
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
@@ -49,4 +56,19 @@ func copyLog(log []LogEntry) []LogEntry {
 	newLog := make([]LogEntry, 0, len(log))
 	copy(newLog, log)
 	return newLog
+}
+
+func copySlice(src []LogEntry, from int, data []LogEntry) []LogEntry {
+	if from > len(src)-1 {
+		return append(src, data...)
+	}
+
+	for i := from; i < minInt(len(src), from+len(data)); i++ {
+		src[i] = data[i-from]
+	}
+
+	if len(data) > len(src)-from {
+		src = append(src, data[len(src)-from:]...)
+	}
+	return src
 }

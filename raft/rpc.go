@@ -72,26 +72,24 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		rf.becomeFollower(req.Term)
 	}
 
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
-		//! delete conflicting entries
-		if len(rf.entries)-1 >= int(req.PrevLogIndex) {
-			rf.entries = rf.entries[:req.PrevLogIndex]
-		}
-		rf.persist()
 		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
 		return
 	}
 
-	lastSharedIndex := minInt64(int64(len(rf.entries))-1, req.PrevLogIndex+int64(len(req.Entries)))
-	for i := req.PrevLogIndex + 1; i <= lastSharedIndex; i++ {
-		rf.entries[i] = req.Entries[i-req.PrevLogIndex-1]
-	}
-	if int(req.PrevLogIndex)+len(req.Entries) > len(rf.entries) {
-		rf.entries = append(rf.entries, req.Entries[lastSharedIndex-req.PrevLogIndex:]...)
+	// If an existing entry conflicts with a new one (same index but different terms),
+	// delete the existing entry and all that follow it
+	for i := 0; i < minInt(len(req.Entries), len(rf.entries)-1-int(req.PrevLogIndex)); i++ {
+		if req.Entries[i].Term != rf.entries[int(req.PrevLogIndex)+i+1].Term {
+			rf.entries = rf.entries[:int(req.PrevLogIndex)+i+1]
+			break
+		}
 	}
 
-	rf.entries = append(rf.entries[:req.PrevLogIndex+1], req.Entries...)
+	// Append any new entries not already in the log
+	rf.entries = copySlice(rf.entries, int(req.PrevLogIndex)+1, req.Entries)
 	rf.persist()
 
 	if req.LeaderCommit > rf.commitIndex {
