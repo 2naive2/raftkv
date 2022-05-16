@@ -1,12 +1,24 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
+
+	lg "github.com/sirupsen/logrus"
+)
+
+type OpType int
+
+var (
+	OpTypeGet    = OpType(0)
+	OpTypePut    = OpType(1)
+	OpTypeAppend = OpType(2)
 )
 
 const Debug = false
@@ -18,11 +30,25 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	OpType OpType
+	Key    string
+	Value  string
+}
+
+type DB struct {
+}
+
+func (db *DB) Get(key string) (err error, value string) {
+	return
+}
+
+func (db *DB) Put(key, value string) (err error) {
+	return
+}
+
+func (db *DB) Append(key, value string) (err error) {
+	return
 }
 
 type KVServer struct {
@@ -34,16 +60,74 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
+	committedCommand int64
+	cmdMu            sync.Mutex
+	DB               DB
+	resultBuffer     map[int64]string
 	// Your definitions here.
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	lg.Infof("receive get request:%+v", args)
+	reply.Err = "no error in get"
+	reply.Value = "你好呀"
 	// Your code here.
 }
 
+func (kv *KVServer) ApplyCommands() {
+	for msg := range kv.applyCh {
+		if !msg.CommandValid {
+			continue
+		}
+
+		cmd := msg.Command.(Op)
+		res := ""
+		switch cmd.OpType {
+		case OpTypeGet:
+		case OpTypePut:
+		case OpTypeAppend:
+		}
+
+		kv.cmdMu.Lock()
+		kv.committedCommand = int64(msg.CommandIndex)
+		kv.resultBuffer[int64(msg.CommandIndex)] = res
+		kv.cmdMu.Unlock()
+	}
+
+}
+
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	lg.Infof("receive put append request:%+v", args)
+	var kind OpType
+	switch args.Op {
+	case "Put":
+		kind = OpTypePut
+	case "Append":
+		kind = OpTypeAppend
+	}
+
+	op := Op{
+		OpType: kind,
+		Key:    args.Key,
+		Value:  args.Value,
+	}
+	cmdIndex, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = "peer is not leader"
+		return
+	}
+
+	//wait for this command to be executed
+	for {
+		kv.cmdMu.Lock()
+		if kv.committedCommand < int64(cmdIndex) {
+			kv.mu.Unlock()
+			time.Sleep(time.Millisecond * 50)
+			continue
+		}
+		kv.cmdMu.Unlock()
+		break
+	}
 }
 
 //
