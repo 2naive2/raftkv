@@ -18,14 +18,18 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// transition to a new term
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		return
+	}
+
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
 
-	reply.Term = rf.currentTerm
-
 	if !logNewer(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
-		rf.mu.Unlock()
 		return
 	}
 
@@ -38,8 +42,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout.Stop()
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
-
-	rf.mu.Unlock()
 }
 
 type AppendEntryRequest struct {
@@ -58,17 +60,16 @@ type AppendEntryResponse struct {
 
 func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	resp.Term = rf.currentTerm
 	if req.Term < rf.currentTerm {
 		resp.Success = false
-		rf.mu.Unlock()
 		//lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
 		return
 	}
 
 	if req.Term > rf.currentTerm {
 		rf.becomeFollower(req.Term)
-		rf.persist()
 	}
 
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
@@ -79,7 +80,6 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 		}
 		rf.persist()
 		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
-		rf.mu.Unlock()
 		return
 	}
 
@@ -110,8 +110,6 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	}
 
 	resp.Success = true
-	resp.Term = rf.currentTerm
-	rf.mu.Unlock()
 	//lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
