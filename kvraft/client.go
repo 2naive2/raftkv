@@ -7,11 +7,10 @@ import (
 	"time"
 
 	"6.824/labrpc"
-	lg "github.com/sirupsen/logrus"
 )
 
 var (
-	CommandTimeout = time.Millisecond * 20
+	CommandTimeout = time.Millisecond * 100
 	ErrTimeout     = errors.New("timeout")
 )
 
@@ -56,21 +55,18 @@ func (ck *Clerk) Get(key string) string {
 
 	if ck.currentLeader != -1 {
 		err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.Get", &req, &resp)
-		if err == nil {
+		if err == nil && resp.Err == "" {
 			return resp.Value
 		}
 	}
 
-	for i, end := range ck.servers {
-		err := CallWithTimeout(CommandTimeout, end.Call, "KVServer.Get", &req, &resp)
-		if err == nil {
+	for i := 0; ; i = (i + 1) % len(ck.servers) {
+		err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.Get", &req, &resp)
+		if err == nil && resp.Err == "" {
 			ck.currentLeader = i
 			return resp.Value
 		}
 	}
-
-	// You will have to modify this function.
-	return ""
 }
 
 //
@@ -98,7 +94,7 @@ func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interfa
 		if !ok {
 			return errors.New("put append no reply")
 		}
-		lg.Infof("put append response:%+v", reply)
+		// lg.Infof("put append response:%+v", reply)
 		return nil
 	}
 }
@@ -113,17 +109,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if ck.currentLeader != -1 {
 		err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
-		if err == nil {
+		if err == nil && resp.Err == "" {
 			return
 		}
 	}
 
-	for i, end := range ck.servers {
-		err := CallWithTimeout(CommandTimeout, end.Call, "KVServer.PutAppend", &req, &resp)
-		if err == nil {
+	for i := 0; ; i = (i + 1) % len(ck.servers) {
+		err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
+		if err == nil && resp.Err == "" {
 			ck.currentLeader = i
 			return
 		}
+		D("[%d] is not leader", i)
+		time.Sleep(CommandTimeout)
 	}
 
 	// You will have to modify this function.

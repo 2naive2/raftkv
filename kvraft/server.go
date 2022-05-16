@@ -1,7 +1,8 @@
 package kvraft
 
 import (
-	"log"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,9 +24,10 @@ var (
 
 const Debug = false
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
+func D(format string, a ...interface{}) (n int, err error) {
+	debug := os.Getenv("debug")
+	if debug == "true" {
+		lg.Infof(format, a...)
 	}
 	return
 }
@@ -37,18 +39,29 @@ type Op struct {
 }
 
 type DB struct {
+	data map[string]string
+	mu   sync.Mutex
 }
 
 func (db *DB) Get(key string) (err error, value string) {
-	return
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	val := db.data[key]
+	return nil, val
 }
 
 func (db *DB) Put(key, value string) (err error) {
-	return
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.data[key] = value
+	return nil
 }
 
 func (db *DB) Append(key, value string) (err error) {
-	return
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.data[key] += value
+	return nil
 }
 
 type KVServer struct {
@@ -68,10 +81,33 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	lg.Infof("receive get request:%+v", args)
-	reply.Err = "no error in get"
-	reply.Value = "你好呀"
-	// Your code here.
+	D("[%d] receive get request,key:[%v]", kv.me, args.Key)
+
+	op := Op{
+		OpType: OpTypeGet,
+		Key:    args.Key,
+	}
+	cmdIndex, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = Err(fmt.Sprintf("[%v] peer is not leader", kv.me))
+		return
+	}
+
+	res := ""
+	//wait for this command to be executed
+	for {
+		committedCommand := atomic.LoadInt64(&kv.committedCommand)
+		if committedCommand < int64(cmdIndex) {
+			time.Sleep(time.Millisecond * 50)
+			continue
+		}
+
+		kv.cmdMu.Lock()
+		res = kv.resultBuffer[int64(cmdIndex)]
+		kv.mu.Unlock()
+		break
+	}
+	reply.Value = res
 }
 
 func (kv *KVServer) ApplyCommands() {
@@ -81,23 +117,25 @@ func (kv *KVServer) ApplyCommands() {
 		}
 
 		cmd := msg.Command.(Op)
-		res := ""
 		switch cmd.OpType {
 		case OpTypeGet:
+			_, val := kv.DB.Get(cmd.Key)
+			kv.cmdMu.Lock()
+			kv.resultBuffer[int64(msg.SnapshotIndex)] = val
+			kv.cmdMu.Unlock()
 		case OpTypePut:
+			kv.DB.Put(cmd.Key, cmd.Value)
 		case OpTypeAppend:
+			kv.DB.Append(cmd.Key, cmd.Value)
 		}
 
-		kv.cmdMu.Lock()
-		kv.committedCommand = int64(msg.CommandIndex)
-		kv.resultBuffer[int64(msg.CommandIndex)] = res
-		kv.cmdMu.Unlock()
+		atomic.StoreInt64(&kv.committedCommand, int64(msg.CommandIndex))
 	}
 
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	lg.Infof("receive put append request:%+v", args)
+	D("[%d] receive put append request,op:[%v]  key:[%v] value:[%v]", kv.me, args.Op, args.Key, args.Value)
 	var kind OpType
 	switch args.Op {
 	case "Put":
@@ -113,19 +151,17 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	cmdIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		reply.Err = "peer is not leader"
+		reply.Err = Err(fmt.Sprintf("[%v] peer is not leader", kv.me))
 		return
 	}
 
 	//wait for this command to be executed
 	for {
-		kv.cmdMu.Lock()
-		if kv.committedCommand < int64(cmdIndex) {
-			kv.mu.Unlock()
+		committedCommand := atomic.LoadInt64(&kv.committedCommand)
+		if committedCommand < int64(cmdIndex) {
 			time.Sleep(time.Millisecond * 50)
 			continue
 		}
-		kv.cmdMu.Unlock()
 		break
 	}
 }
@@ -179,7 +215,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.DB = DB{
+		data: make(map[string]string),
+	}
+
+	go kv.ApplyCommands()
 
 	return kv
 }
