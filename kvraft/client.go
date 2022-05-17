@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	CommandTimeout = time.Millisecond * 100
+	CommandTimeout = time.Millisecond * 1000
 	ErrTimeout     = errors.New("timeout")
 )
 
@@ -105,9 +105,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Value: value,
 		Op:    op,
 	}
-	resp := PutAppendReply{}
 
 	if ck.currentLeader != -1 {
+		resp := PutAppendReply{}
 		err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
 		if err == nil && resp.Err == "" {
 			return
@@ -115,12 +115,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 
 	for i := 0; ; i = (i + 1) % len(ck.servers) {
+		resp := PutAppendReply{}
 		err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
 		if err == nil && resp.Err == "" {
 			ck.currentLeader = i
 			return
 		}
-		D("[%d] is not leader", i)
+		D("{%d} error:%v", i, resp.Err)
 		time.Sleep(CommandTimeout)
 	}
 

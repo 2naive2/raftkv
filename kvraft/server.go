@@ -44,6 +44,7 @@ type DB struct {
 }
 
 func (db *DB) Get(key string) (err error, value string) {
+	// D("get, key:%v,data:%v", key, db.data)
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	val := db.data[key]
@@ -51,9 +52,11 @@ func (db *DB) Get(key string) (err error, value string) {
 }
 
 func (db *DB) Put(key, value string) (err error) {
+	// D("put , key:%v value:%v", key, value)
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.data[key] = value
+	// D("data after put:%v", db.data)
 	return nil
 }
 
@@ -104,7 +107,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 		kv.cmdMu.Lock()
 		res = kv.resultBuffer[int64(cmdIndex)]
-		kv.mu.Unlock()
+		kv.cmdMu.Unlock()
 		break
 	}
 	reply.Value = res
@@ -116,12 +119,14 @@ func (kv *KVServer) ApplyCommands() {
 			continue
 		}
 
+		D("[%d] apply command:%+v", kv.me, msg)
+
 		cmd := msg.Command.(Op)
 		switch cmd.OpType {
 		case OpTypeGet:
 			_, val := kv.DB.Get(cmd.Key)
 			kv.cmdMu.Lock()
-			kv.resultBuffer[int64(msg.SnapshotIndex)] = val
+			kv.resultBuffer[int64(msg.CommandIndex)] = val
 			kv.cmdMu.Unlock()
 		case OpTypePut:
 			kv.DB.Put(cmd.Key, cmd.Value)
@@ -164,6 +169,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		break
 	}
+	D("[%d] command:%d done", kv.me, cmdIndex)
 }
 
 //
@@ -218,6 +224,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.DB = DB{
 		data: make(map[string]string),
 	}
+
+	kv.resultBuffer = make(map[int64]string)
 
 	go kv.ApplyCommands()
 
