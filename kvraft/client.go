@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	CommandTimeout = time.Millisecond * 1000
+	CommandTimeout = time.Millisecond * 100
 	ErrTimeout     = errors.New("timeout")
 )
 
@@ -51,20 +51,27 @@ func (ck *Clerk) Get(key string) string {
 	req := GetArgs{
 		Key: key,
 	}
-	resp := GetReply{}
 
 	if ck.currentLeader != -1 {
-		err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.Get", &req, &resp)
-		if err == nil && resp.Err == "" {
+		resp := GetReply{}
+		// err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.Get", &req, &resp)
+		ok := ck.servers[ck.currentLeader].Call("KVServer.Get", &req, &resp)
+		if ok && resp.Err == "" {
+			D("[client] get done,resp:%+v", resp)
 			return resp.Value
 		}
 	}
 
 	for i := 0; ; i = (i + 1) % len(ck.servers) {
-		err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.Get", &req, &resp)
-		if err == nil && resp.Err == "" {
+		resp := GetReply{}
+		ok := ck.servers[i].Call("KVServer.Get", &req, &resp)
+		// err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.Get", &req, &resp)
+		if ok && resp.Err == "" {
 			ck.currentLeader = i
+			D("[client] get done,resp:%+v", resp)
 			return resp.Value
+		} else {
+			D("[client] get failed,err:%v", resp.Err)
 		}
 	}
 }
@@ -79,6 +86,46 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
+
+func (ck *Clerk) PutAppend(key string, value string, op string) {
+	req := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+
+	if ck.currentLeader != -1 {
+		resp := PutAppendReply{}
+		// err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
+		ok := ck.servers[ck.currentLeader].Call("KVServer.PutAppend", &req, &resp)
+		if ok && resp.Err == "" {
+			D("[client] put append done,resp:%+v,current leader:%v", resp, ck.currentLeader)
+			return
+		}
+	}
+
+	for i := 0; ; i = (i + 1) % len(ck.servers) {
+		resp := PutAppendReply{}
+		ok := ck.servers[i].Call("KVServer.PutAppend", &req, &resp)
+		// err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
+		if ok && resp.Err == "" {
+			ck.currentLeader = i
+			D("[client] put append done,resp:%+v,current leader:%v", resp, ck.currentLeader)
+			return
+		}
+		D("{%d} error:%v", i, resp.Err)
+		time.Sleep(CommandTimeout)
+	}
+
+	// You will have to modify this function.
+}
+
+func (ck *Clerk) Put(key string, value string) {
+	ck.PutAppend(key, value, "Put")
+}
+func (ck *Clerk) Append(key string, value string) {
+	ck.PutAppend(key, value, "Append")
+}
 
 func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interface{}, reply interface{}) bool, svcMeth string, args interface{}, reply interface{}) error {
 	resChan := make(chan bool)
@@ -97,40 +144,4 @@ func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interfa
 		// lg.Infof("put append response:%+v", reply)
 		return nil
 	}
-}
-
-func (ck *Clerk) PutAppend(key string, value string, op string) {
-	req := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
-	}
-
-	if ck.currentLeader != -1 {
-		resp := PutAppendReply{}
-		err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
-		if err == nil && resp.Err == "" {
-			return
-		}
-	}
-
-	for i := 0; ; i = (i + 1) % len(ck.servers) {
-		resp := PutAppendReply{}
-		err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
-		if err == nil && resp.Err == "" {
-			ck.currentLeader = i
-			return
-		}
-		D("{%d} error:%v", i, resp.Err)
-		time.Sleep(CommandTimeout)
-	}
-
-	// You will have to modify this function.
-}
-
-func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
-}
-func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
 }

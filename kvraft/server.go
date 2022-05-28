@@ -111,6 +111,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		break
 	}
 	reply.Value = res
+	D("[%d] command:%d done", kv.me, cmdIndex)
 }
 
 func (kv *KVServer) ApplyCommands() {
