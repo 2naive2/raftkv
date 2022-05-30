@@ -200,10 +200,10 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-func (kv *KVServer) serveConn() {
+func (kv *KVServer) serveConn(addr string) {
 	rpc.Register(kv)
 	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", ":1234")
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
 
 	}
@@ -224,7 +224,7 @@ func (kv *KVServer) serveConn() {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, addr string) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
@@ -245,12 +245,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.resultBuffer = make(map[int64]string)
 
 	go kv.applyCommands()
-	go kv.serveConn()
+	go kv.serveConn(addr)
 
 	return kv
-}
-
-func main() {
-	server := StartKVServer(nil, 0, nil, 0)
-	lg.Info("start server done!,server:%+v", server)
 }

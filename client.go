@@ -12,7 +12,7 @@ func main() {
 		Key: "name",
 	}
 	resp := &kvraft.GetReply{}
-	client, err := rpc.DialHTTP("tcp", ":1234")
+	client, err := rpc.DialHTTP("tcp", ":5555")
 	if err != nil {
 	}
 	err = client.Call("KVServer.Get", req, resp)
