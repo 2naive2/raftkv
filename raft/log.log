@@ -1692,4 +1692,4 @@ time="2022-04-18T15:50:11+08:00" level=info msg="[0] follower commits log at 11,
 time="2022-04-18T15:50:11+08:00" level=info msg="[0] follower commits log at 12,with entries:[{Data:-1 Term:0} {Data:1 Term:1} {Data:540355157 Term:1} {Data:1939110883 Term:1} {Data:657816204 Term:1} {Data:526812500 Term:1} {Data:1396339537 Term:1} {Data:1973338291 Term:1} {Data:1940634067 Term:1} {Data:480082107 Term:1} {Data:2060738737 Term:1} {Data:1433293633 Term:1} {Data:567226758 Term:1}]"
   ... Passed --   2.0  3   42   10928   12
 PASS
-ok  	6.824/raft	43.967s
+ok  	github.com/2naive2/raftkv/raft	43.967s

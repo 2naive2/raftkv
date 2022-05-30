@@ -8,14 +8,17 @@ package main
 // go build -buildmode=plugin crash.go
 //
 
-import "6.824/mr"
-import "math/rand"
-import "strings"
-import "strconv"
-import "time"
-import "fmt"
-import "os"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/2naive2/raftkv/mr"
+)
 
 var count int
 

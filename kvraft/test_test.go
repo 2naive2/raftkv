@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"6.824/models"
-	"6.824/porcupine"
+	"github.com/2naive2/raftkv/models"
+	"github.com/2naive2/raftkv/porcupine"
 )
 
 // The tester generously allows solutions to complete elections in one second

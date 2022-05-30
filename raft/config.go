@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"6.824/labgob"
-	"6.824/labrpc"
+	"github.com/2naive2/raftkv/labgob"
+	"github.com/2naive2/raftkv/labrpc"
 
 	crand "crypto/rand"
 	"encoding/base64"

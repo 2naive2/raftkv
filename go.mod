@@ -1,6 +1,8 @@
-module 6.824
+module github.com/2naive2/raftkv
 
-go 1.15
+replace github.com/2naive2/raftkv => ./
+
+go 1.17
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

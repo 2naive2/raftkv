@@ -1,8 +1,8 @@
 package main
 
 import (
-	"6.824/kvraft"
-	"6.824/raft"
+	"github.com/2naive2/raftkv/kvraft"
+	"github.com/2naive2/raftkv/raft"
 	lg "github.com/sirupsen/logrus"
 )
 

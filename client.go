@@ -3,7 +3,7 @@ package main
 import (
 	"net/rpc"
 
-	"6.824/kvraft"
+	"github.com/2naive2/raftkv/kvraft"
 	lg "github.com/sirupsen/logrus"
 )
 

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"6.824/mr"
+	"github.com/2naive2/raftkv/mr"
 )
 
 //

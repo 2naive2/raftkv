@@ -6,7 +6,7 @@ import (
 	"math/big"
 	"time"
 
-	"6.824/labrpc"
+	"github.com/2naive2/raftkv/labrpc"
 )
 
 var (

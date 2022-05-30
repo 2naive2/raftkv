@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
+	"github.com/2naive2/raftkv/labgob"
+	"github.com/2naive2/raftkv/labrpc"
+	"github.com/2naive2/raftkv/raft"
 
 	lg "github.com/sirupsen/logrus"
 )
