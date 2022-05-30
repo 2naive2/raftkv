@@ -2,6 +2,9 @@ package kvraft
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+	"net/rpc"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -83,7 +86,7 @@ type KVServer struct {
 	// Your definitions here.
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) error {
 	D("[%d] receive get request,key:[%v]", kv.me, args.Key)
 
 	op := Op{
@@ -93,7 +96,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	cmdIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = Err(fmt.Sprintf("[%v] peer is not leader", kv.me))
-		return
+		return nil
 	}
 
 	res := ""
@@ -112,9 +115,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	reply.Value = res
 	D("[%d] command:%d done", kv.me, cmdIndex)
+	return nil
 }
 
-func (kv *KVServer) ApplyCommands() {
+func (kv *KVServer) applyCommands() {
 	for msg := range kv.applyCh {
 		if !msg.CommandValid {
 			continue
@@ -140,7 +144,7 @@ func (kv *KVServer) ApplyCommands() {
 
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	D("[%d] receive put append request,op:[%v]  key:[%v] value:[%v]", kv.me, args.Op, args.Key, args.Value)
 	var kind OpType
 	switch args.Op {
@@ -158,7 +162,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	cmdIndex, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = Err(fmt.Sprintf("[%v] peer is not leader", kv.me))
-		return
+		return nil
 	}
 
 	//wait for this command to be executed
@@ -170,7 +174,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		break
 	}
+
 	D("[%d] command:%d done", kv.me, cmdIndex)
+	return nil
 }
 
 //
@@ -192,6 +198,16 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) serveConn() {
+	rpc.Register(kv)
+	rpc.HandleHTTP()
+	l, err := net.Listen("tcp", ":1234")
+	if err != nil {
+
+	}
+	go http.Serve(l, nil)
 }
 
 //
@@ -228,7 +244,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.resultBuffer = make(map[int64]string)
 
-	go kv.ApplyCommands()
+	go kv.applyCommands()
+	go kv.serveConn()
 
 	return kv
+}
+
+func main() {
+	server := StartKVServer(nil, 0, nil, 0)
+	lg.Info("start server done!,server:%+v", server)
 }
