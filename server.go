@@ -1,32 +1,19 @@
 package main
 
 import (
-	"encoding/json"
-	"io/ioutil"
-	"os"
+	"flag"
 
 	"github.com/2naive2/raftkv/kvraft"
-	"github.com/2naive2/raftkv/model"
 	"github.com/2naive2/raftkv/raft"
 	lg "github.com/sirupsen/logrus"
 )
 
 func main() {
-	conf := model.Conf{}
-	reader, err := os.Open("conf.json")
-	if err != nil {
-
-	}
-	bytes, err := ioutil.ReadAll(reader)
-	if err != nil {
-
-	}
-	err = json.Unmarshal(bytes, &conf)
-	if err != nil {
-
-	}
+	num := flag.Int("num", 0, "number of running raft peer")
+	debug := flag.Bool("debug", false, "whether to output debug info")
+	flag.Parse()
 	persister := raft.MakePersister()
-	server := kvraft.StartKVServer(nil, 0, persister, 0, conf.ServerAddress["0"])
-	lg.Info("start server done!,server:%+v", server)
+	kvraft.StartKVServer(*num, persister, 0, *debug)
+	lg.Info("start server done!")
 	select {}
 }

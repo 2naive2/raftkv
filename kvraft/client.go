@@ -3,19 +3,23 @@ package kvraft
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
+	"net/rpc"
 	"time"
 
-	"github.com/2naive2/raftkv/labrpc"
+	"github.com/2naive2/raftkv/model"
+	lg "github.com/sirupsen/logrus"
+	"github.com/spf13/cast"
 )
 
 var (
-	CommandTimeout = time.Millisecond * 100
+	CommandTimeout = time.Millisecond * 1000
 	ErrTimeout     = errors.New("timeout")
 )
 
 type Clerk struct {
-	servers       []*labrpc.ClientEnd
+	servers       []*rpc.Client
 	currentLeader int
 	// You will have to modify this struct.
 }
@@ -27,10 +31,35 @@ func nrand() int64 {
 	return x
 }
 
-func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
+func establishClientConn(ends []*rpc.Client, conf *model.Conf) {
+	for {
+		done := true
+		for i, end := range ends {
+			if end == nil {
+				done = false
+				client, err := rpc.DialHTTP("tcp", conf.ServerAddress[cast.ToString(i)])
+				if err != nil {
+					continue
+				}
+				ends[i] = client
+			}
+		}
+		if done {
+			lg.Infof("client side all connection established")
+			break
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func MakeClerk() *Clerk {
 	ck := new(Clerk)
+	conf := model.GetConf()
+	servers := make([]*rpc.Client, len(conf.ServerAddress))
 	ck.servers = servers
 	ck.currentLeader = -1
+
+	go establishClientConn(servers, conf)
 	// You'll have to add code here.
 	return ck
 }
@@ -54,9 +83,9 @@ func (ck *Clerk) Get(key string) string {
 
 	if ck.currentLeader != -1 {
 		resp := GetReply{}
-		// err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.Get", &req, &resp)
-		ok := ck.servers[ck.currentLeader].Call("KVServer.Get", &req, &resp)
-		if ok && resp.Err == "" {
+		ok := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.Get", &req, &resp)
+		// ok := ck.servers[ck.currentLeader].Call("KVServer.Get", &req, &resp)
+		if ok == nil && resp.Err == "" {
 			D("[client] get done,resp:%+v", resp)
 			return resp.Value
 		}
@@ -64,9 +93,9 @@ func (ck *Clerk) Get(key string) string {
 
 	for i := 0; ; i = (i + 1) % len(ck.servers) {
 		resp := GetReply{}
-		ok := ck.servers[i].Call("KVServer.Get", &req, &resp)
-		// err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.Get", &req, &resp)
-		if ok && resp.Err == "" {
+		// ok := ck.servers[i].Call("KVServer.Get", &req, &resp)
+		ok := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.Get", &req, &resp)
+		if ok == nil && resp.Err == "" {
 			ck.currentLeader = i
 			D("[client] get done,resp:%+v", resp)
 			return resp.Value
@@ -96,9 +125,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if ck.currentLeader != -1 {
 		resp := PutAppendReply{}
-		// err := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
-		ok := ck.servers[ck.currentLeader].Call("KVServer.PutAppend", &req, &resp)
-		if ok && resp.Err == "" {
+		ok := CallWithTimeout(CommandTimeout, ck.servers[ck.currentLeader].Call, "KVServer.PutAppend", &req, &resp)
+		// ok := ck.servers[ck.currentLeader].Call("KVServer.PutAppend", &req, &resp)
+		if ok == nil && resp.Err == "" {
 			D("[client] put append done,resp:%+v,current leader:%v", resp, ck.currentLeader)
 			return
 		}
@@ -106,9 +135,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	for i := 0; ; i = (i + 1) % len(ck.servers) {
 		resp := PutAppendReply{}
-		ok := ck.servers[i].Call("KVServer.PutAppend", &req, &resp)
-		// err := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
-		if ok && resp.Err == "" {
+		// ok := ck.servers[i].Call("KVServer.PutAppend", &req, &resp)
+		ok := CallWithTimeout(CommandTimeout, ck.servers[i].Call, "KVServer.PutAppend", &req, &resp)
+		if ok == nil && resp.Err == "" {
 			ck.currentLeader = i
 			D("[client] put append done,resp:%+v,current leader:%v", resp, ck.currentLeader)
 			return
@@ -116,8 +145,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		D("{%d} error:%v", i, resp.Err)
 		time.Sleep(CommandTimeout)
 	}
-
-	// You will have to modify this function.
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -127,8 +154,8 @@ func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
 
-func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interface{}, reply interface{}) bool, svcMeth string, args interface{}, reply interface{}) error {
-	resChan := make(chan bool)
+func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interface{}, reply interface{}) error, svcMeth string, args interface{}, reply interface{}) error {
+	resChan := make(chan error)
 	go func() {
 		res := fn(svcMeth, args, reply)
 		resChan <- res
@@ -138,10 +165,9 @@ func CallWithTimeout(timeout time.Duration, fn func(svcMeth string, args interfa
 	case <-time.After(CommandTimeout):
 		return ErrTimeout
 	case ok := <-resChan:
-		if !ok {
-			return errors.New("put append no reply")
+		if ok != nil {
+			return errors.New(fmt.Sprintf("rpc failed,err:%v", ok))
 		}
-		// lg.Infof("put append response:%+v", reply)
 		return nil
 	}
 }

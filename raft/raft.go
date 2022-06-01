@@ -21,19 +21,19 @@ import (
 	//	"bytes"
 	"bytes"
 	"math/rand"
+	"net/rpc"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"github.com/2naive2/raftkv/labgob"
 	"github.com/2naive2/raftkv/labgob"
-	"github.com/2naive2/raftkv/labrpc"
-	//lg "github.com/sirupsen/logrus"
+	lg "github.com/sirupsen/logrus"
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	//lg.SetFormatter(&//lg.TextFormatter{FullTimestamp: true})
+	lg.SetFormatter(&lg.TextFormatter{FullTimestamp: true})
 }
 
 //
@@ -74,8 +74,8 @@ var (
 
 var (
 	HeartBeatInterval = time.Millisecond * 100
-	ElectionMinTime   = time.Millisecond * 300
-	ElectionDeltaTime = 300
+	ElectionMinTime   = time.Millisecond * 1000
+	ElectionDeltaTime = 500
 	RPCTimeout        = time.Millisecond * 300
 	RPCRetryInterval  = time.Millisecond * 100
 	SyncLoginterval   = time.Millisecond * 50
@@ -85,11 +85,11 @@ var (
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu        sync.Mutex    // Lock to protect shared access to this peer's state
+	peers     []*rpc.Client // RPC end points of all peers
+	persister *Persister    // Object to hold this peer's persisted state
+	me        int           // this peer's index into peers[]
+	dead      int32         // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -186,12 +186,12 @@ func (rf *Raft) readPersist(data []byte) {
 
 	if d.Decode(&term) != nil ||
 		d.Decode(&votedFor) != nil || d.Decode(&entries) != nil {
-		//lg.Error("decode from persistent state failed")
+		lg.Error("decode from persistent state failed")
 	} else {
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.entries = entries
-		//lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
+		lg.Infof("[%d] loaded state, term:%v , currentTerm:%v entries:%v", rf.me, rf.currentTerm, rf.votedFor, rf.entries)
 	}
 }
 
@@ -245,7 +245,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	result := make(chan bool, 1)
+	// not established connection yet,return false
+	if rf.peers[server] == nil {
+		return false
+	}
+	result := make(chan error, 1)
 	go func() {
 		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 		result <- ok
@@ -254,17 +258,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
+		if res != nil {
+			return false
+		}
 		if reply.Term > atomic.LoadInt64(&rf.currentTerm) {
 			atomic.StoreInt64(&rf.currentTerm, reply.Term)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 			rf.persist()
 		}
-		return res
+		return true
 	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *AppendEntryResponse) bool {
-	result := make(chan bool, 1)
+	// not established connection yet,return false
+	if rf.peers[server] == nil {
+		return false
+	}
+	result := make(chan error, 1)
 	go func() {
 		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 		result <- ok
@@ -273,12 +284,15 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryRequest, reply *A
 	case <-time.After(RPCTimeout):
 		return false
 	case res := <-result:
+		if res != nil {
+			return false
+		}
 		if reply.Term > atomic.LoadInt64(&rf.currentTerm) {
 			atomic.StoreInt64(&rf.currentTerm, reply.Term)
 			atomic.StoreInt64((*int64)(&rf.state), int64(RaftStateFollwer))
 			rf.persist()
 		}
-		return res
+		return true
 	}
 }
 
@@ -306,7 +320,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := LogEntry{Term: rf.currentTerm, Data: command}
 	rf.entries = append(rf.entries, entry)
 	rf.persist()
-	//lg.Infof("[%d] leader append new entry %v,entries :%v", rf.me, entry, rf.entries)
+	lg.Infof("[%d] leader append new entry %v", rf.me, entry)
 
 	// immediate begin to sync log to followers
 	rf.syncLogTimeout.Stop()
@@ -416,9 +430,9 @@ func (rf *Raft) startAnElection() {
 	rf.mu.Lock()
 	if grantedVotes > len(rf.peers)/2 && rf.state == RaftStateCandidate {
 		rf.becomeLeader()
-		//lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
+		lg.Infof("[%d] win election for term:%v with votes:%v", rf.me, atomic.LoadInt64(&rf.currentTerm), grantedVotes)
 	} else {
-		//lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		lg.Infof("[%d] lose  election for term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 	}
 	rf.mu.Unlock()
 }
@@ -434,7 +448,7 @@ func (rf *Raft) ticker() {
 			continue
 		}
 
-		//lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
+		lg.Infof("[%d] election timeout and start an election,current term:%v", rf.me, atomic.LoadInt64(&rf.currentTerm))
 		rf.becomeCandidate()
 		rf.mu.Unlock()
 
@@ -452,7 +466,7 @@ func (rf *Raft) syncLogs() {
 		<-rf.syncLogTimeout.C
 		rf.mu.Lock()
 		if rf.state != RaftStateLeader {
-			//lg.Warnf("[%d] is deprected from leader", rf.me)
+			lg.Warnf("[%d] is deprected from leader", rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -500,7 +514,7 @@ func (rf *Raft) syncLogs() {
 						continue
 					}
 
-					//lg.Infof("[%d] sync entries :%v to [%d]", rf.me, syncEntries, i)
+					lg.Infof("[%d] sync entries :%v to [%d]", rf.me, syncEntries, i)
 					rf.mu.Lock()
 					if rf.state != RaftStateLeader {
 						// immediately terminal sync log thread
@@ -517,7 +531,7 @@ func (rf *Raft) syncLogs() {
 						break
 					} else {
 						rf.nextIndex[i] = req.PrevLogIndex
-						//lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
+						lg.Infof("[%d] detect inconsistency in [%d],new nextIndex:%d", rf.me, i, rf.nextIndex[i])
 						rf.mu.Unlock()
 					}
 				}
@@ -527,7 +541,7 @@ func (rf *Raft) syncLogs() {
 		rf.mu.Unlock()
 		rf.syncLogTimeout.Reset(SyncLoginterval)
 	}
-	//lg.Warnf("[%d] is deprected from leader", rf.me)
+	lg.Warnf("[%d] is deprected from leader", rf.me)
 }
 
 func updateCommitIndex(rf *Raft) {
@@ -556,7 +570,7 @@ func updateCommitIndex(rf *Raft) {
 					}
 					// rf.commitIndex = maxInt64(rf.commitIndex, len)
 					rf.ApplyChan <- msg
-					//lg.Infof("[%d] leader commits log at %d", rf.me, i)
+					lg.Infof("[%d] leader commits log at %d", rf.me, i)
 				}
 				rf.firstCommit = 1
 			} else {
@@ -567,7 +581,7 @@ func updateCommitIndex(rf *Raft) {
 					CommandIndex: int(cur),
 				}
 				rf.ApplyChan <- msg
-				//lg.Infof("[%d] leader commits log at %d", rf.me, cur)
+				lg.Infof("[%d] leader commits log at %d", rf.me, cur)
 			}
 			rf.applyChanIndex[rf.me] = cur
 		}
@@ -585,7 +599,7 @@ func updateCommitIndex(rf *Raft) {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func Make(peers []*labrpc.ClientEnd, me int,
+func Make(peers []*rpc.Client, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers

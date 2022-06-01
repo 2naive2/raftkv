@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/2naive2/raftkv/labgob"
-	"github.com/2naive2/raftkv/labrpc"
+	"github.com/2naive2/raftkv/model"
 	"github.com/2naive2/raftkv/raft"
+	"github.com/spf13/cast"
 
 	lg "github.com/sirupsen/logrus"
 )
@@ -25,7 +26,7 @@ var (
 	OpTypeAppend = OpType(2)
 )
 
-const Debug = false
+var Debug = false
 
 func D(format string, a ...interface{}) (n int, err error) {
 	debug := os.Getenv("debug")
@@ -202,6 +203,7 @@ func (kv *KVServer) killed() bool {
 
 func (kv *KVServer) serveConn(addr string) {
 	rpc.Register(kv)
+	rpc.Register(kv.rf)
 	rpc.HandleHTTP()
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -224,16 +226,41 @@ func (kv *KVServer) serveConn(addr string) {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, addr string) *KVServer {
+
+func establishConn(ends []*rpc.Client, me int, conf *model.Conf) {
+	for {
+		done := true
+		for i, end := range ends {
+			if end == nil && i != me {
+				done = false
+				client, err := rpc.DialHTTP("tcp", conf.ServerAddress[cast.ToString(i)])
+				if err != nil {
+					continue
+				}
+				ends[i] = client
+			}
+		}
+		if done {
+			lg.Infof("[%d] all connection established", me)
+			break
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func StartKVServer(me int, persister *raft.Persister, maxraftstate int, debug bool) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	Debug = debug
 
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
+	conf := model.GetConf()
+	servers := make([]*rpc.Client, len(conf.ServerAddress))
+	go establishConn(servers, me, conf)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -245,7 +272,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.resultBuffer = make(map[int64]string)
 
 	go kv.applyCommands()
-	go kv.serveConn(addr)
+	go kv.serveConn(conf.ServerAddress[cast.ToString(me)])
 
 	return kv
 }

@@ -1,7 +1,7 @@
 package raft
 
 import (
-	//lg "github.com/sirupsen/logrus"
+	lg "github.com/sirupsen/logrus"
 )
 
 type RequestVoteArgs struct {
@@ -17,14 +17,14 @@ type RequestVoteReply struct {
 }
 
 // stub impl for RequestVite
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
 	// transition to a new term
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
-		return
+		return nil
 	}
 
 	if args.Term > rf.currentTerm {
@@ -32,11 +32,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if !logNewer(args.LastLogTerm, args.LastLogIndex, rf.entries[len(rf.entries)-1].Term, int64(len(rf.entries)-1)) {
-		return
+		return nil
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-		//lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
+		lg.Infof("[%d] vote for [%d]", rf.me, args.CandidateID)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.persist()
@@ -44,6 +44,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionTimeout.Stop()
 		rf.electionTimeout.Reset(genRandomElectionTimeout())
 	}
+
+	return nil
 }
 
 type AppendEntryRequest struct {
@@ -60,14 +62,14 @@ type AppendEntryResponse struct {
 	Success bool
 }
 
-func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) {
+func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	resp.Term = rf.currentTerm
 	if req.Term < rf.currentTerm {
 		resp.Success = false
-		//lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
-		return
+		lg.Infof("[%d] reject append entry,cur term : %d,req term:%d,entries:%v", rf.me, rf.currentTerm, req.Term, rf.entries)
+		return nil
 	}
 
 	rf.electionTimeout.Stop()
@@ -80,8 +82,8 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.entries)-1 < int(req.PrevLogIndex) || rf.entries[req.PrevLogIndex].Term != req.PrevLogTerm {
 		resp.Success = false
-		//lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
-		return
+		lg.Infof("[%d] reject append entry,cur entries : %d,req :%+v", rf.me, rf.entries, req)
+		return nil
 	}
 
 	// If an existing entry conflicts with a new one (same index but different terms),
@@ -106,14 +108,15 @@ func (rf *Raft) AppendEntries(req *AppendEntryRequest, resp *AppendEntryResponse
 				CommandIndex: int(i),
 			}
 			rf.ApplyChan <- msg
-			//lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
+			lg.Infof("[%d] follower commits log at %d,with entries:%+v", rf.me, i, rf.entries)
 		}
 		rf.commitIndex = newCommitIndex
 		rf.applyChanIndex[rf.me] = newCommitIndex
 	}
 
 	resp.Success = true
-	// //lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
+	// lg.Infof("[%d] reset election timeout due to heart beat", rf.me)
 	rf.electionTimeout.Stop()
 	rf.electionTimeout.Reset(genRandomElectionTimeout())
+	return nil
 }
